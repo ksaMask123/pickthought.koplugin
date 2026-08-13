@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>设备端 BUG 核查报告 · pickthought.koplugin</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0f1115; color: #d7dae0;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.6; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; color: #eef1f6; border-left: 4px solid #4f9cf9; padding-left: 12px; }
+  .meta { color: #8b93a1; font-size: 13px; margin: 6px 0 24px; }
+  .card { background: #171a21; border: 1px solid #262b36; border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+  .card h2 { font-size: 16px; color: #9ecbff; margin: 0 0 10px; }
+  code, .mono { font-family: "SFMono-Regular", Consolas, monospace; background: #0c0e13;
+    padding: 1px 6px; border-radius: 4px; color: #e6b673; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #262b36; vertical-align: top; }
+  th { color: #9aa4b2; font-weight: 600; }
+  .bad { color: #ff7b72; } .warn { color: #e6b673; } .ok { color: #5fd38a; }
+  .tag { display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px; }
+  .t-bad { background: #ff7b7222; color: #ff7b72; border: 1px solid #ff7b7255; }
+  .t-warn { background: #e6b67322; color: #e6b673; border: 1px solid #e6b67355; }
+  .t-ok { background: #5fd38a22; color: #5fd38a; border: 1px solid #5fd38a55; }
+  pre { background: #0c0e13; border: 1px solid #262b36; border-radius: 6px; padding: 10px 12px;
+    overflow-x: auto; font-size: 12px; color: #d7dae0; }
+  ul { margin: 6px 0; padding-left: 20px; } li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>设备端 BUG 核查报告 · pickthought.koplugin</h1>
+  <div class="meta">
+    核查对象：<code>G:/koreader/plugins/pickthought.koplugin/</code> ·
+    关联 PR：#9~#13（HTML/CSS、EPUB 磁盘中转、SQLite LRU、spine 缓存、多书绑定）·
+    核查日期：2026-08-13 · 方式：只读比对 + crash.log 扫描 ·
+    <b style="color:#5fd38a">状态：Bug A/B 已于 2026-08-13 部署修复（见第六节）</b>
+  </div>
+
+  <div class="card">
+    <h2>一、设备版本指纹</h2>
+    <ul>
+      <li>路径：<code>G:/koreader/plugins/pickthought.koplugin/pickthought/</code></li>
+      <li>多书标记 <code>book_ids</code>：<span class="bad">存在</span> → 设备运行的是<b>多书实验构建</b></li>
+      <li><code>spine_cache.lua</code>：存在（PR③ 形态）</li>
+      <li><code>DISK_PATH_THRESHOLD</code>：存在（PR② 形态）</li>
+      <li>结论：设备部署的是「多书 + 性能优化」实验构建，但<b>早于 PR②/PR#13 的崩溃修复</b> → 两个 EPUB 注入 bug 仍存活</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>二、5 个 PR 期间发现的 BUG 与设备现状</h2>
+    <table>
+      <tr><th>BUG</th><th>发现于</th><th>症状 / 严重度</th><th>修复（在哪个 PR）</th><th>设备现状</th></tr>
+
+      <tr>
+        <td><b>A. addPath 参数错位</b><br><code>epub_inject.lua</code></td>
+        <td>PR② 构建期</td>
+        <td><code>copy_entry_via_disk</code> 中 <code>addPath(first, sub, ...)</code> 参数顺序错：源应为刚抽出的临时文件、zip 名应为原始 <code>entry.path</code>，否则顶层目录 <code>OEBPS/</code> 丢失、磁盘中转的非目标大条目路径错乱 / 注入失败。<br><span class="bad">严重度：高</span></td>
+        <td>PR②、PR#13 改为<br><code>addPath(sub .. "/" .. rest, entry.path, true, mtime)</code></td>
+        <td><span class="ok">✅ 已修复（2026-08-13 部署）</span><br>现设备 epub_inject.lua:235<br><code>writer:addPath(sub .. "/" .. rest, entry.path, true, mtime)</code></td>
+      </tr>
+
+      <tr>
+        <td><b>B. disk_tmp 遮蔽成 nil</b><br><code>epub_inject.lua</code></td>
+        <td>PR② 构建期；多书自查期复查源时再确认</td>
+        <td>全局赋值 <code>disk_tmp = dest..".spine-"..tostring(mtime)</code> 后，又 <code>local disk_tmp</code> 遮蔽成 nil。注入遇 ≥512KB 大条目走磁盘中转时 <code>U.mkdir(nil)</code> → 崩溃。<br><span class="bad">严重度：高</span></td>
+        <td>PR②、PR#13 改为单点<br><code>local disk_tmp = dest .. ".spine-" .. tostring(mtime)</code></td>
+        <td><span class="ok">✅ 已修复（2026-08-13 部署）</span><br>现设备 epub_inject.lua:324<br><code>local disk_tmp = dest .. ".spine-" .. tostring(mtime)</code>（单点定义，无遮蔽）</td>
+      </tr>
+
+      <tr>
+        <td><b>C. mark_class 死代码耦合</b><br><code>thoughts.lua ↔ annotations.lua</code></td>
+        <td>PR④ 测试期（21 测试失败）</td>
+        <td>PR④ 删 <code>Thoughts.mark_class</code> 定义，但基线 <code>annotations.lua</code> 仍调用 → <code>attempt to index ... (a nil value)</code> 崩溃。靠 rebase PR④ onto PR①（PR① 已删调用）修复。<br><span class="warn">严重度：中</span></td>
+        <td>PR④（rebase 到 PR①）</td>
+        <td><span class="warn">⚠️ 仅留死代码</span><br>定义仍在 thoughts.lua:64，但 <b>无调用方</b>（annotations.lua 已无 <code>mark_class(</code>）→ <b>不会崩</b>，仅冗余</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>三、设备上修复前的 bug 代码（部署前快照，仅供对照）</h2>
+    <h3>Bug A — 设备 epub_inject.lua:233（错误）</h3>
+    <pre>233:    local ok_add = writer:addPath(first, sub, true, mtime)   -- ❌ 参数错位</pre>
+    <h3>Bug B — 设备 epub_inject.lua:321-326（错误）</h3>
+    <pre>321:    -- 非目标大条目走磁盘拷贝的临时根目录:本批同步一个,失败/结束统一清理。
+322:    disk_tmp = dest .. ".spine-" .. tostring(mtime)   -- ❌ 全局赋值
+323:    U.mkdir(disk_tmp)
+324:
+325:    local reader
+326:    local disk_tmp  -- ❌ 又 local,遮蔽成 nil</pre>
+  </div>
+
+  <div class="card">
+    <h2>四、crash.log 核查</h2>
+    <ul>
+      <li>路径：<code>G:/koreader/crash.log</code>（259 KB，最后更新 08/13 11:58）</li>
+      <li>结果：<span class="ok">未发现</span> <code>addPath</code> / <code>disk_tmp</code> / <code>mark_class</code> / <code>nil value</code> / <code>epub_inject</code> 相关崩溃；末尾为正常退出（exit code 0）。</li>
+      <li>解读：当前测试书（白板书在线拉取注入，无大图 / 字库）未触发上述 bug 的触发条件，故未崩。<br><b>属潜伏性风险</b>：下本含 ≥512KB 嵌入资源（图 / 字库 / 媒体）或嵌套资源的书注入时，极可能复现崩溃。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>五、结论与建议</h2>
+    <ul>
+      <li>设备当前部署版 = 多书实验构建，<b>Bug A、Bug B 已于 2026-08-13 部署修复</b>（见第六节），<b>不再存活</b>，潜伏崩溃风险已消除。</li>
+      <li><b>已执行</b>：将 PR#13（<code>feature/multi-book</code>）分支中修复后的 <code>epub_inject.lua</code> 部署到设备 <code>G:/koreader/plugins/pickthought.koplugin/pickthought/</code>，同时消除了 Bug A、Bug B（该分支已内联全部修复，含 PR② disk 中转修复 + 多书支持）。</li>
+      <li>Bug C 在设备上无崩溃风险，仍可保留；待作者合并 PR④ 后随版本清理死代码。</li>
+      <li>注：本报告最初为只读核查快照（2026-08-13 11:58 前设备状态），现已同步更新 Bug A/B 的修复状态与部署记录。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>六、部署记录（2026-08-13 用户授权执行）</h2>
+    <ul>
+      <li><b>操作对象</b>：<code>G:/koreader/plugins/pickthought.koplugin/pickthought/epub_inject.lua</code></li>
+      <li><b>源文件</b>：PR#13 分支 <code>feature/multi-book</code> 的修复版 <code>epub_inject.lua</code>（已内联 PR② disk 中转修复 + 多书支持）</li>
+      <li><b>安全流程</b>：
+        <ul>
+          <li>① 先 <code>diff</code> 核对源与设备文件 → 差异<b>仅</b>两处 bug 区（233 addPath / 322+326 disk_tmp），其余完全一致，确认不会破坏多书构建</li>
+          <li>② 备份原文件 → <code>D:/repos/_device_backup/epub_inject.lua.before-fix-20260813</code>（23566 字节）</li>
+          <li>③ 覆盖部署 → 复 <code>diff</code> 确认 device == source（无差异）</li>
+          <li>④ <code>grep</code> 确认两修复生效、无残留 bug 签名；LuaJIT 语法 <code>SYNTAX_OK</code></li>
+        </ul>
+      </li>
+      <li><b>部署后设备状态</b>：
+        <ul>
+          <li>Bug A：235 行现为 <code>writer:addPath(sub .. "/" .. rest, entry.path, true, mtime)</code> ✅</li>
+          <li>Bug B：324 行现为单点 <code>local disk_tmp = dest .. ".spine-" .. tostring(mtime)</code> ✅</li>
+        </ul>
+      </li>
+      <li><b>生效提示</b>：KOReader 需<b>重启应用 / 重载插件</b>才会加载新的 lua 文件。</li>
+      <li><b>仍残留（非崩溃）</b>：Bug C <code>mark_class</code> 死代码（thoughts.lua:64 定义，无调用）仍在，不崩，等 PR④ 合并随版本清理。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
