@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pickthought · 滑窗耗时采样与降级让出 — 专属更新日志</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#30363d;
+    --text:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --mono:'SFMono-Regular',Consolas,'Liberation Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.7;padding:32px 16px}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:18px;margin:30px 0 10px;color:var(--accent);
+    border-left:3px solid var(--accent);padding-left:10px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:8px;background:var(--panel);border:1px solid var(--border);
+    border-radius:8px;padding:14px;margin:16px 0;font-size:13px}
+  .meta div span{color:var(--muted)}
+  .meta b{font-family:var(--mono);color:var(--text);font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+    padding:16px 18px;margin:12px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;
+    border-radius:4px;font-size:12.5px;color:#a5d6ff}
+  pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+    padding:14px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;
+    margin-right:6px;font-family:var(--mono)}
+  .t-green{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+  .t-amber{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.4)}
+  .t-blue{background:rgba(88,166,255,.15);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .tl{position:relative;margin:10px 0 0 8px;padding-left:22px}
+  .tl::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--border)}
+  .tl .ev{position:relative;margin:0 0 14px}
+  .tl .ev::before{content:'';position:absolute;left:-21px;top:6px;width:10px;height:10px;
+    border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+  .tl .ev .d{color:var(--muted);font-size:12px;font-family:var(--mono)}
+  .tl .ev .t{font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th,td{border:1px solid var(--border);padding:8px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--accent)}
+  .ok{color:var(--green)} .warn{color:var(--amber)} .bad{color:var(--red)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>pickthought · 滑窗耗时采样与降级让出</h1>
+  <div class="sub">专属更新日志（时间线） · 仅存档于 fork <code>ksaMask123/pickthought.koplugin</code> 的 <code>main</code>，不进入 PR diff</div>
+
+  <div class="meta">
+    <div><span>改动日期</span><br><b>2026-08-13</b></div>
+    <div><span>插件</span><br><b>pickthought.koplugin</b></div>
+    <div><span>主改动模块</span><br><b>performance_mode.lua</b></div>
+    <div><span>PR 编号</span><br><b>#17（上游 Mr54233）</b></div>
+    <div><span>分支</span><br><b>pr/sliding-degrade</b></div>
+    <div><span>提交哈希</span><br><b>7346328</b></div>
+    <div><span>基线</span><br><b>upstream/main a4eed38 (v0.2.4)</b></div>
+    <div><span>关联可行性报告</span><br><b>audit/（本地，未推送）</b></div>
+  </div>
+
+  <h2>一、动机</h2>
+  <div class="card">
+    注入热路径（<code>epub_inject.lua</code> 的副本拷贝循环、<code>sync.lua</code> 的章节批量抓取）在 KPW3 等低性能墨水屏设备上可能长时间 CPU 满载，挤压阅读主线程的调度与刷新，造成卡顿甚至看门狗触发。既有代码用整秒 <code>os.time()</code> 计时，<strong>无法分辨 &lt;1s 的慢单元</strong>，也没有「连续变慢即主动让出」的柔性降级机制。
+    本改动引入一个<strong>纯状态机</strong>的滑窗性能采样器：滑动窗口内统计单元处理耗时，连续 N 次超过阈值即置位「降级」标志；降级时在进度心跳 / 抓取节拍之间主动让出 CPU（生产默认 <code>FFIUtil.usleep(150ms)</code>），把算力交还阅读主线程，防卡顿。
+  </div>
+
+  <h2>二、具体改动点</h2>
+  <div class="card">
+    <p><span class="tag t-blue">performance_mode.lua（新增）</span> 纯状态机，无任何 UIManager / KOReader 全局依赖，可在 worker 子进程与单元测试中通用：</p>
+    <ul>
+      <li><code>M:new(opts)</code> / <code>M.default()</code>：可注入 <code>now_ms</code>（单调毫秒时钟）与 <code>rest</code>（让出回调）；默认 <code>window_s=600</code>、<code>slow_ms=1200</code>、<code>consecutive=2</code>。</li>
+      <li><code>M:record(name, ms)</code>：滑窗裁剪 + 连续慢计数；达到 <code>consecutive</code> 次即置位 <code>_degraded</code> 并记录 <code>degraded_since</code>（降级为会话内粘性，仅 <code>reset()</code> 清除）。</li>
+      <li><code>M:degraded()</code> / <code>M:rest()</code> / <code>M:reset()</code> / <code>M:slow_count()</code>：读取降级标志、执行让出、复位全部状态、统计当前窗口慢单元数。</li>
+      <li>字段刻意用 <code>_degraded</code> / <code>_rest</code> 命名，<strong>避免遮蔽同名元表方法</strong>（修复：原先实例字段 <code>degraded</code>/<code>rest</code> 遮蔽方法导致 <code>perf:degraded()</code> 调用布尔值崩溃）。</li>
+    </ul>
+    <p><span class="tag t-blue">epub_inject.lua</span> 集成：</p>
+    <ul>
+      <li><code>inject_copy</code> 每单元用 <code>perf:now()</code> 打点、<code>perf:record(entry.path, …)</code> 记录耗时。</li>
+      <li>降级时在 <code>opts.progress</code> 心跳前调用 <code>perf:rest()</code> 让出一次。</li>
+    </ul>
+    <p><span class="tag t-blue">sync.lua</span> 集成：</p>
+    <ul>
+      <li><code>Sync.run</code> 在每章 <code>fetch</code> 节拍前若 <code>perf:degraded()</code> 则 <code>perf:rest()</code>，抓取后 <code>perf:record(ch.uid, …)</code> 记录耗时。</li>
+    </ul>
+    <p><span class="tag t-blue">tests</span> 改动：</p>
+    <ul>
+      <li>新增 <code>tests/test_performance_mode.lua</code>（7 case：初始未降级 / 连续慢触发 / 快单元打断 / 滑窗裁剪 / reset 清除 / rest 注入回调 / default 字段），全部用注入伪时钟。</li>
+      <li><code>tests/run.lua</code>：注册 <code>test_performance_mode</code>。</li>
+    </ul>
+  </div>
+
+  <h2>三、影响范围</h2>
+  <div class="card">
+    <ul>
+      <li>仅新增一个独立模块 <code>performance_mode.lua</code>，并在注入 / 同步热路径<strong>插入采样与可选让出</strong>；默认参数下非降级时行为与原版一致（仅多几次整数运算与表写入），不改变注入产物内容。</li>
+      <li><strong>不改变注入字节产出</strong>：不影响 EPUB 副本内容、数据库 schema、多书（D）逻辑。</li>
+      <li>让出默认仅在降级时触发，且仅在进度心跳 / 抓取节拍边界执行，不会打断单次单元处理的原子性。</li>
+      <li><strong>不动 SQLite 层</strong>（④ 的改动范围），与 ④ 零文件冲突。</li>
+    </ul>
+  </div>
+
+  <h2>四、校验结果（四重自检全过）</h2>
+  <table>
+    <tr><th>关卡</th><th>结果</th></tr>
+    <tr><td>LuaJIT 语法</td><td class="ok">5 文件 OK（performance_mode / epub_inject / sync / test_performance_mode / run.lua）</td></tr>
+    <tr><td>单元测试</td><td class="ok">137 passed / 0 failed（含本 PR 7 项性能模式用例；③ 子集 50/0）</td></tr>
+    <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无新 <code>local _</code> 遮蔽 / 代理 LOAD_OK（epub_inject、sync）</td></tr>
+    <tr><td>diff 复核</td><td class="ok">仅 5 文件：新增 performance_mode.lua + test_performance_mode.lua，修改 epub_inject.lua / sync.lua / run.lua</td></tr>
+  </table>
+
+  <h2>五、冲突面</h2>
+  <div class="card">
+    <ul>
+      <li>③ 改注入热路径（<code>epub_inject.lua</code> / <code>sync.lua</code>）+ 新增 <code>performance_mode.lua</code>；④（PR#15）只改 <code>thought_db.lua</code>。<strong>零文件冲突</strong>，可独立评审 / 合入。</li>
+      <li>基于上游 <code>main</code>（a4eed38 / v0.2.4）独立开分；基线已含 v0.2.4 的 <code>annotation_compat.lua</code>，本 PR 在其上叠加，run.lua 合并时仅新增测试注册行。</li>
+      <li>与 ④ 同为「性能 / 健壮性」向优化，建议二者先后合入、再统一部署到设备（G: 盘，用户连接后）。</li>
+    </ul>
+  </div>
+
+  <h2>六、备注（预存无害告警）</h2>
+  <div class="card">
+    <code>epub_inject.lua</code> 的 <code>ensure_style()</code> 内有 3 处预存的 <code>local _, x = html:find(...)</code> 遮蔽（@124/129/133），<strong>非本 PR 引入</strong>；该函数体内仅做 html 截取、<strong>无任何 gettext <code>_()</code> 调用</strong>，故遮蔽不会触发崩溃，维持原状不动。
+  </div>
+
+</div>
+</body>
+</html>
