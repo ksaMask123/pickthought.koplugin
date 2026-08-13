@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pickthought · 数据库完整性校验与 WAL 折叠 — 专属更新日志</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#30363d;
+    --text:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff; --green:#3fb950;
+    --amber:#d29922; --red:#f85149; --mono:'SFMono-Regular',Consolas,'Liberation Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+    line-height:1.7;padding:32px 16px}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:18px;margin:30px 0 10px;color:var(--accent);
+    border-left:3px solid var(--accent);padding-left:10px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:8px;background:var(--panel);border:1px solid var(--border);
+    border-radius:8px;padding:14px;margin:16px 0;font-size:13px}
+  .meta div span{color:var(--muted)}
+  .meta b{font-family:var(--mono);color:var(--text);font-weight:600}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+    padding:16px 18px;margin:12px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;
+    border-radius:4px;font-size:12.5px;color:#a5d6ff}
+  pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+    padding:14px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;
+    margin-right:6px;font-family:var(--mono)}
+  .t-green{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+  .t-amber{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.4)}
+  .t-blue{background:rgba(88,166,255,.15);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .tl{position:relative;margin:10px 0 0 8px;padding-left:22px}
+  .tl::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--border)}
+  .tl .ev{position:relative;margin:0 0 14px}
+  .tl .ev::before{content:'';position:absolute;left:-21px;top:6px;width:10px;height:10px;
+    border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+  .tl .ev .d{color:var(--muted);font-size:12px;font-family:var(--mono)}
+  .tl .ev .t{font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th,td{border:1px solid var(--border);padding:8px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--accent)}
+  .ok{color:var(--green)} .warn{color:var(--amber)} .bad{color:var(--red)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>pickthought · 数据库完整性校验与 WAL 折叠</h1>
+  <div class="sub">专属更新日志（时间线） · 仅存档于 fork <code>ksaMask123/pickthought.koplugin</code> 的 <code>main</code>，不进入 PR diff</div>
+
+  <div class="meta">
+    <div><span>改动日期</span><br><b>2026-08-13</b></div>
+    <div><span>插件</span><br><b>pickthought.koplugin</b></div>
+    <div><span>主改动模块</span><br><b>thought_db.lua</b></div>
+    <div><span>PR 编号</span><br><b>#15（上游 Mr54233）</b></div>
+    <div><span>分支</span><br><b>pr/db-integrity</b></div>
+    <div><span>提交哈希</span><br><b>3ebb048</b></div>
+    <div><span>基线</span><br><b>upstream/main a4eed38 (v0.2.4)</b></div>
+    <div><span>关联可行性报告</span><br><b>audit/9（本地，未推送）</b></div>
+  </div>
+
+  <h2>一、动机</h2>
+  <div class="card">
+    pickthought 的想法数据库位于书籍目录（常在 FAT32 SD 卡）。FAT32 在意外断电 / 热插拔时易产生损坏页；此前 SQLite 层已有 WAL + 事务 + 文件清理，但<strong>缺 <code>integrity_check</code>、迁移追踪表、<code>wal_checkpoint</code></strong>。缺 integrity_check 意味着损坏库会被直接打开、可能引发开书异常；WAL 模式下 <code>-wal</code>/<code>-shm</code> 长期留存也增大下次崩溃窗口与 IO 开销。本改动补齐这三块，对 KPW3 等低性能墨水屏设备的本地健壮性收益最高。
+  </div>
+
+  <h2>二、具体改动点</h2>
+  <div class="card">
+    <p><span class="tag t-blue">thought_db.lua</span> 改动清单：</p>
+    <ul>
+      <li>新增 <code>SCHEMA_VERSION</code> 常量（当前 = 1），作为 schema 迁移基线。</li>
+      <li>新增 <code>get_user_version()</code> / <code>set_user_version(v)</code>：用 <code>PRAGMA user_version</code> 记录 schema 版本（当前仅记录，不做破坏性迁移）。</li>
+      <li>新增 <code>ThoughtDB.integrity_check(db)</code>：<code>PRAGMA integrity_check</code> 经 prepare+step 校验返回 <code>ok</code>，否则返回错误信息字符串。</li>
+      <li>新增 <code>ThoughtDB.checkpoint(db)</code>：<code>PRAGMA wal_checkpoint(TRUNCATE)</code> 折叠 WAL 回主库并回收 <code>-wal</code>/<code>-shm</code>。</li>
+      <li><code>open</code> 改为「打开即核验 + 损坏重建一次」：调用完整性校验，损坏则丢弃本地缓存（想法可由注入源重建）并重建成干净库；用内层 <code>_attempt</code> 包裹，<strong>仅重试一次防递归</strong>。</li>
+      <li><code>close</code> 改为「关闭前 <code>checkpoint</code>」：先折叠 WAL 再关闭句柄，降低下次打开的 IO 与崩溃窗口。</li>
+    </ul>
+    <p><span class="tag t-blue">tests</span> 改动清单：</p>
+    <ul>
+      <li>新增 <code>tests/test_thought_db_integrity.lua</code>（6 case：校验通过 / 损坏重建 / 迁移写入 / user_version 读回 / checkpoint 调用 / 打开即核验）。</li>
+      <li><code>tests/stubs.lua</code>：扩展 sqlite mock 支持 <code>integrity_check</code> / <code>user_version</code>（PRAGMA 分支只返回一次，避免无限循环）。</li>
+      <li><code>tests/run.lua</code>：修 <code>io.stdout:setvbuf("no")</code> 使非 TTY 下汇总可见；注册 <code>test_thought_db_integrity</code>。</li>
+    </ul>
+  </div>
+
+  <h2>三、影响范围</h2>
+  <div class="card">
+    <ul>
+      <li>仅 <code>thought_db.lua</code> 的<strong>打开 / 关闭</strong>与新增<strong>只读 API</strong>。</li>
+      <li><strong>不动注入热路径</strong>（<code>epub_inject.lua</code> / <code>sync.lua</code> 未触及）。</li>
+      <li><strong>不动数据 schema 形状</strong>：<code>review_items</code> 表定义一字未改，持久化行为不变。</li>
+      <li><strong>多书（D）逻辑未引入</strong>。</li>
+    </ul>
+  </div>
+
+  <h2>四、校验结果（四重自检全过）</h2>
+  <table>
+    <tr><th>关卡</th><th>结果</th></tr>
+    <tr><td>LuaJIT 语法</td><td class="ok">4 文件 OK</td></tr>
+    <tr><td>单元测试</td><td class="ok">129 passed / 0 failed（含本 PR 6 项 DB 完整性用例）</td></tr>
+    <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无 <code>local _</code> 遮蔽 / 代理 LOAD_OK</td></tr>
+    <tr><td>diff 复核</td><td class="ok">仅 4 文件（thought_db.lua + run.lua + stubs.lua + 新测试），与 #11 SQLite-LRU 零文件冲突</td></tr>
+  </table>
+
+  <h2>五、冲突面</h2>
+  <div class="card">
+    <ul>
+      <li>④ 只改 <code>thought_db.lua</code>，而 PR#11（sqlite-lru）改的是 <code>thoughts.lua</code>，<strong>零文件冲突</strong>，可独立评审 / 合入。</li>
+      <li>基于上游 <code>main</code>（a4eed38 / v0.2.4）独立开分；基线已含 v0.2.4 的 <code>annotation_compat.lua</code>，本 PR 在其上叠加，run.lua 合并时仅新增测试注册行。</li>
+      <li>建议先于 ③ 滑窗降级（将改注入热路径）合入，使 SQLite 层先稳定。</li>
+    </ul>
+  </div>
+
+  <h2>六、时间线</h2>
+  <div class="tl">
+    <div class="ev"><div class="d">2026-08-13 早</div><div class="t">可行性评估（audit/9）</div><div>确认 5 个本地优化可取项里仅 ④ DB 完整性校验 与 ③ 滑窗降级 需新写；④ 排前、③ 排后。</div></div>
+    <div class="ev"><div class="d">2026-08-13 下午</div><div class="t">实现 ④</div><div>在 <code>thought_db.lua</code> 加 integrity_check / checkpoint / user_version + open/close 改造；新增 6 case 测试；扩展 sqlite mock。</div></div>
+    <div class="ev"><div class="d">2026-08-13 下午</div><div class="t">四重自检</div><div>LuaJIT 语法 OK；单测 129/0；加载期核验 OK；diff 复核仅 4 文件。</div></div>
+    <div class="ev"><div class="d">2026-08-13 晚</div><div class="t">推送并开 PR #15</div><div>首次推到 fork <code>pr/db-integrity</code> 并开 PR 到上游 <code>main</code>（初编号 #15）。发现误把 fork <code>main</code> 的 audit 提交带入 PR diff，修正：cherry-pick 代码提交到干净上游 <code>main</code>（提交 3ebb048），force-push 后 PR diff 仅剩 4 个代码/测试文件。</div></div>
+    <div class="ev"><div class="d">2026-08-13 晚</div><div class="t">changelog 重建</div><div>本 HTML 因 rebase 事故被误删，重建后提交到 fork <code>main</code>（不进 PR diff）。</div></div>
+  </div>
+
+  <h2>七、校验备注</h2>
+  <div class="card">
+    <p class="warn">纪律提醒：本 changelog 仅进 fork <code>main</code>，不进 PR #15 的 diff。任何把 ④ 代码推送到 GitHub 的动作，都必须同步把本 HTML 一并更新并推送（已执行）。</p>
+  </div>
+</div>
+</body>
+</html>
