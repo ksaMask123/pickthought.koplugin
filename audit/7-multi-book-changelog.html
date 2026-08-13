@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>多书绑定 PR 更新日志 · pickthought.koplugin</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0f1115; color: #d7dae0;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.6; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; color: #eef1f6; border-left: 4px solid #4f9cf9; padding-left: 12px; }
+  .meta { color: #8b93a1; font-size: 13px; margin: 6px 0 24px; }
+  .card { background: #171a21; border: 1px solid #262b36; border-radius: 10px;
+    padding: 18px 20px; margin: 16px 0; }
+  .card h2 { font-size: 16px; color: #9ecbff; margin: 0 0 10px; }
+  .card h3 { font-size: 14px; color: #c9d1dc; margin: 14px 0 6px; }
+  code, .mono { font-family: "SFMono-Regular", Consolas, monospace; background: #0c0e13;
+    padding: 1px 6px; border-radius: 4px; color: #e6b673; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #262b36; }
+  th { color: #9aa4b2; font-weight: 600; }
+  .ok { color: #5fd38a; }
+  .tag { display: inline-block; background: #1f6feb22; color: #9ecbff; border: 1px solid #1f6feb55;
+    border-radius: 999px; padding: 1px 10px; font-size: 12px; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>多书绑定 PR · 专属更新日志</h1>
+  <div class="meta">
+    插件：<code>pickthought.koplugin</code> · 分支：<code>feature/multi-book</code> → <code>main</code>
+    （上游 <code>Mr54233/pickthought.koplugin</code>）· 类型：Draft / RFC · 记录日期：2026-08-13
+  </div>
+
+  <div class="card">
+    <h2>原作者要求 / 背景（Mr54233）</h2>
+    <p>在拆分前述 4 个性能 PR 时，作者曾表示「多书绑定暂不做」。但后续作者对已实现的多书绑定分支
+    <b>表达出兴趣，希望看到实现</b>，故本 PR 作为 <span class="tag">Draft · RFC</span> 提交，便于直接 review 多书注入的完整实现。</p>
+  </div>
+
+  <div class="card">
+    <h2>如何达成作者诉求</h2>
+    <ul>
+      <li>把原本只支持单书注入的同步流程，扩展为<strong>多书绑定</strong>能力：用户可在「绑定」界面把多本书（≥2）绑定到同一组「想法」。</li>
+      <li>注入时，spine 缓存、ChapterMap 匹配、thoughts SQLite 句柄均按 <code>book_id</code> 隔离，多本书的想法分别落到各自 book_id 下。</li>
+      <li>跨书匹配：绑定组内任一书的章节都可命中组内其他书的想法，避免重复注入。</li>
+      <li>配套继承了 PR② 对 <code>epub_inject.lua</code> 的两个必崩 bug 修复（<code>addPath</code> 参数错位、<code>disk_tmp</code> 遮蔽成 nil），确保大条目注入不崩。</li>
+      <li>为让本 Draft 自包含、不依赖尚未合并的 PR #9~#12，本分支已<strong>内联</strong>这些性能优化的对应代码，作者可在单一分支看到多书特性的完整形态。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>详细说明 · 改动文件</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr><td><code>binding.lua</code></td><td>多书绑定界面与 <code>book_ids</code> 管理（+267）</td></tr>
+      <tr><td><code>sync.lua</code></td><td>按 <code>book_id</code> 隔离 spine 缓存与 ChapterMap 跨书匹配（+402）</td></tr>
+      <tr><td><code>epub_inject.lua</code></td><td>多书注入路径 + <code>disk_tmp</code> 崩溃修复（+164）</td></tr>
+      <tr><td><code>sync_task.lua</code></td><td>多书 deps 装配（+56）</td></tr>
+      <tr><td><code>thoughts.lua</code></td><td>per-book SQLite LRU 在多书下的正确性（+48）</td></tr>
+      <tr><td><code>chapter_map.lua</code> / <code>annotations.lua</code> / <code>api.lua</code> / <code>annotation_style.lua</code></td><td>多书可见串 / 标记适配</td></tr>
+      <tr><td><code>tests/test_binding.lua</code> / <code>test_sync.lua</code> / <code>test_epub_inject.lua</code></td><td>多书用例</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>验证结果</h2>
+    <ul>
+      <li>LuaJIT 全套件：<span class="ok">129 passed / 0 failed</span></li>
+      <li>多书注入路径无 <code>attempt to index ... (a nil value)</code> 崩溃（<code>disk_tmp</code> 已修）</li>
+      <li>CRLF = 0，LuaJIT 语法全 OK</li>
+    </ul>
+    <h3>提交前自查发现并已修复的阻断项</h3>
+    <ul>
+      <li>review 源为「混合源」（A+B+C+D 混在一起）→ 以 <code>main</code> 为基整体成一支，diff 即完整多书特性，自包含、不冲突。</li>
+      <li>review 源仍带 <code>disk_tmp</code> 遮蔽 bug（注入 ≥512KB 大条目 nil 拼接崩溃）→ 已按 PR② 修复：单点 <code>local disk_tmp = dest .. ".spine-" .. tostring(mtime)</code>。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>状态</h2>
+    <p><span class="tag">Draft / RFC</span> 建议作者先 review 整体设计，待 PR #9~#12 合并后可再 rebase 收敛。本 PR 不强制要求立即合并。</p>
+  </div>
+</div>
+</body>
+</html>
