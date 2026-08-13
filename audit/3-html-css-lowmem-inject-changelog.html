@@ -33,6 +33,24 @@
     修改日期 2026-08-13
   </div>
 
+  <div class="card" style="border-left:4px solid var(--green);">
+    <h2>原作者要求（Mr54233）</h2>
+    <ul>
+      <li>评审后要求将开书崩溃修复拆分为 4 个独立 PR，本 PR 对应第一项：<b>低内存 HTML/CSS 注入优化</b>。</li>
+      <li>把注入 EPUB 的 HTML/CSS 内存占用降下来：去掉每标注唯一 class、减少样式盒子、把虚线边框改成更便宜的文本级样式，使注入量大时也不撑爆 CRE 样式缓存、不开书崩溃。</li>
+      <li>范围：只做单书态，不引入多书绑定逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent);">
+    <h2>本 PR 如何达成</h2>
+    <ul>
+      <li><b>去唯一 class</b>：<code>annotations.lua</code> 移除每标注唯一 class 及其 <code>Thoughts.mark_class</code> 调用，碰撞锚点改用共享 class + <code>data-pickthought-range</code>/<code>href</code>，折叠 2→1；CRE 计费从「唯一 class 盒子 × 标注数」降为单一共享 class。</li>
+      <li><b>边框改文本装饰</b>：<code>annotation_style.lua</code> 把 <code>border-bottom</code> 虚线改为 <code>text-decoration</code>（文本级样式，单价≈0），消除最贵盒子边框开销。</li>
+      <li>两项叠加后，注入元素样式单价从盒子级降到文本级，在 10MB 预算内可承载注入量大幅提升，根因性消除开书崩溃。</li>
+    </ul>
+  </div>
+
   <div class="card">
     <h2>动机</h2>
     <ul>

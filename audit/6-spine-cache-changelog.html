@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>撷思 pickthought.koplugin — 正文 spine 缓存 更新日志</title>
+<style>
+  :root{--bg:#1e1e1e;--card:#262626;--fg:#e0e0e0;--muted:#9a9a9a;--accent:#4ea1ff;--green:#5fd38a;--red:#ff7b72;--border:#3a3a3a;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;}
+  .wrap{max-width:900px;margin:0 auto;}
+  h1{font-size:22px;border-left:4px solid var(--accent);padding-left:12px;margin:0 0 6px;}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px;}
+  .meta a{color:var(--accent);text-decoration:none;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+  .card h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+  code{background:#1a1a1a;border-radius:5px;padding:1px 6px;font-size:12.5px;color:var(--green);}
+  pre{background:#1a1a1a;border:1px solid var(--border);border-radius:6px;padding:12px;overflow:auto;font-size:12.5px;}
+  ul{margin:6px 0;padding-left:20px;}li{margin:5px 0;}
+  .ok{color:var(--green);} .bad{color:var(--red);}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  td,th{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+  th{background:#2e2e2e;color:var(--fg);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>正文 spine 缓存 — 更新日志</h1>
+  <div class="meta">
+    插件 <b>pickthought.koplugin</b> (KOReader, AGPL-3.0) ·
+    PR <a href="https://github.com/ksaMask123/pickthought.koplugin/pull/4" target="_blank">#4</a> ·
+    分支 <code>pr/spine-cache</code> ·
+    修改日期 2026-08-13
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--green);">
+    <h2>原作者要求（Mr54233）</h2>
+    <ul>
+      <li>拆分后的第三项：<b>正文 spine 缓存</b>。</li>
+      <li>分批同步时，每批都要把整本书的 spine 文件从 EPUB 解压进内存再 normalize，慢书 + 低性能设备（FAT32 SD、256MB RAM）上反复解压很费时；要求把每个 spine 文件的原始 HTML 落盘缓存，后续批次直读缓存、不再解压原 EPUB。</li>
+      <li>范围：只做单书态缓存（B），不引入多书绑定逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent);">
+    <h2>本 PR 如何达成</h2>
+    <ul>
+      <li><b>spine 原始 HTML 落盘缓存</b>：新增 <code>spine_cache.lua</code>，把每个 spine 文件的 <code>read_text</code> 原始输出按「源书指纹」缓存到与 <code>map.json</code> 同目录的 <code>spine-&lt;指纹&gt;</code> 文件。</li>
+      <li><b>暖模式直读缓存</b>：<code>sync.lua</code> 在 map 阶段用 <code>cached_read_text</code> / <code>cached_read_spine</code> 包装——暖模式（缓存命中）直接读盘上缓存文本，不再解压 EPUB、不再重复 normalize。</li>
+      <li><b>缓存失效安全</b>：指纹与 <code>map.json</code> 同源（源书大小@算法版本），换书或升算法自动整体作废；中断残留由 <code>SpineCache</code> 启动时清理；缓存的是原始 HTML，ChapterMap 仍照常 normalize（幂等），匹配/注入结果与不缓存时逐字节一致。</li>
+      <li><b>开关明确</b>：<code>sync_task.lua</code> 仅置 <code>spine_cache = true</code> 开启；单书态下 <code>map_cache_path</code> 本就是字符串，无多书 F2 回归。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>动机</h2>
+    <ul>
+      <li>分批同步时每批都重新解压整本 EPUB 的 spine 再 normalize，慢书/低性能设备上反复解压开销大、易触发看门狗超时。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>具体改动点</h2>
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr>
+        <td><code>spine_cache.lua</code></td>
+        <td>新模块（通用、无多书耦合）：冷捕→暖服、指纹作废、中断残留清理。</td>
+      </tr>
+      <tr>
+        <td><code>sync.lua</code></td>
+        <td>+B 块 + <code>cached_read_text</code>/<code>cached_read_spine</code> 包装（<code>map_cache_path</code> 直接当字符串用，不引入多书助手）。</td>
+      </tr>
+      <tr>
+        <td><code>sync_task.lua</code></td>
+        <td>仅置 <code>spine_cache = true</code> 开关。</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_spine_cache.lua</code></td>
+        <td>新增：冷→暖用例 + 写盘失败 / 缓存缺失 / 中断恢复 三扩展。</td>
+      </tr>
+      <tr>
+        <td><code>tests/run.lua</code></td>
+        <td>注册 <code>test_spine_cache</code>。</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>影响范围</h2>
+    <ul>
+      <li>同步期 spine 读取通道；注入字节结果与不缓存时一致；未引入多书（D）逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>校验结果</h2>
+    <ul>
+      <li class="ok">LuaJIT 语法校验：通过（3 文件）。</li>
+      <li class="ok">全套件：<b>127 passed / 0 failed</b>（新增 4 用例）。</li>
+      <li class="ok">多书（D）残留扫描：<b>0</b>；CRLF：<b>0</b>。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

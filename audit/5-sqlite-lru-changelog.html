@@ -33,6 +33,25 @@
     修改日期 2026-08-13
   </div>
 
+  <div class="card" style="border-left:4px solid var(--green);">
+    <h2>原作者要求（Mr54233）</h2>
+    <ul>
+      <li>拆分后的第四项：<b>SQLite 连接 LRU</b>。</li>
+      <li>每本开书都 <code>open</code> 一个 SQLite 句柄且不释放，多书/反复点锚点累积句柄 → 句柄与内存泄漏；要求限制 SQLite 连接数（LRU 上限）、关书时释放单本句柄，并清理不再被调用的死代码（<code>Thoughts.mark_class</code>）。</li>
+      <li>范围：只做单书态，不引入多书绑定逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent);">
+    <h2>本 PR 如何达成</h2>
+    <ul>
+      <li><b>per-book 句柄 LRU 上限</b>：<code>thoughts.lua</code> 引入 <code>DB_CACHE_MAX=4</code> 的 per-book SQLite 句柄缓存，<code>open_db</code> 超上限淘汰最久未用句柄，从根上限制并发连接数。</li>
+      <li><b>关书释放</b>：新增 <code>close_book</code> 释放单本句柄，<code>clear_memory_cache</code> 全量清理，避免长期驻留。</li>
+      <li><b>清理死代码</b>：删除不再被调用的 <code>Thoughts.mark_class</code>（唯一 class 已由 PR① 去除）。</li>
+      <li>淘汰只关句柄、不删数据，重开仍可检索，持久化行为不变。</li>
+    </ul>
+  </div>
+
   <div class="card">
     <h2>动机</h2>
     <ul>

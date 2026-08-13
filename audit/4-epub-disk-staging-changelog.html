@@ -33,6 +33,23 @@
     修改日期 2026-08-13
   </div>
 
+  <div class="card" style="border-left:4px solid var(--green);">
+    <h2>原作者要求（Mr54233）</h2>
+    <ul>
+      <li>拆分后的第二项：<b>EPUB 大文件磁盘中转</b>。</li>
+      <li>注入时整包在 Lua 堆里读→写，大图/字库/媒体（数 MB）造成内存尖峰、低内存设备 OOM 崩溃；要求把大条目改为走磁盘中转，不进 Lua 堆，灭掉内存尖峰；失败一律回退内存路径、行为不变。</li>
+      <li>范围：只做磁盘中转（A），不引入多书绑定逻辑。</li>
+    </ul>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent);">
+    <h2>本 PR 如何达成</h2>
+    <ul>
+      <li><b>大条目磁盘中转（灭 OOM 尖峰）</b>：<code>epub_inject.lua</code> 新增 <code>DISK_PATH_THRESHOLD = 512*1024</code>，对非目标大条目（图/字库/媒体 ≥512KB 且路径含 <code>/</code>）走 <code>extractToPath → 临时文件 → addPath</code> 磁盘中转，数据不进 Lua 堆；失败自动回退内存路径，注入结果逐字节一致。</li>
+      <li><b>顺带修复两个必崩 bug</b>：① <code>addPath</code> 参数写反（源/zip 名错位）→ 源=刚抽出的临时文件、zip 名=原始 <code>entry.path</code>，否则顶层目录（如 <code>OEBPS/</code>）丢失；② <code>disk_tmp</code> 被 <code>local</code> 遮蔽成 <code>nil</code> → 单点定义，否则任何带大媒体的书在磁盘中转时直接报错崩溃。两项修复均被测试覆盖。</li>
+    </ul>
+  </div>
+
   <div class="card">
     <h2>动机</h2>
     <ul>
