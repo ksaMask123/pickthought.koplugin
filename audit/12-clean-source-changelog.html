@@ -48,11 +48,11 @@
 
   <div class="panel panel2">
     <div class="kv">
-      <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）</div>
+      <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
       <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (38c352c)</div>
-      <div class="k">提交</div><div class="v"><code>39b53e6</code> feat(sync): 外部干净源绕开脏/缺失 .orig 的 clean_source 逃生舱</div>
-      <div class="k">改动文件</div><div class="v">3 个：<code>sync.lua</code> (+40/−2)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync_clean_source.lua</code> (新增 175 行)</div>
-      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 157/0</span><span class="badge b-acc">含 6 个新用例</span></div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱</div>
+      <div class="k">改动文件</div><div class="v">5 个：<code>sync.lua</code> (+42/−3)、<code>main.lua</code> (+28)、<code>sync_task.lua</code> (+4)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync_clean_source.lua</code> (新增 175)</div>
+      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 157/0</span><span class="badge b-acc">含 6 个新用例</span><span class="badge b-acc">设备数据动态验证通过</span></div>
     </div>
   </div>
 
@@ -85,7 +85,7 @@
               <li>LuaJIT 语法校验：<span class="ok">通过</span>（<code>luajit -bl sync.lua</code>）。</li>
               <li>加载期校验：<span class="ok">通过</span>（<code>require</code> 全量测试套件无加载错误）。</li>
               <li>运行期校验：<span class="ok">全量测试 157 passed / 0 failed</span>（上游 18 个测试文件全绿 + 新增 6 个 clean_source 用例）。</li>
-              <li>Diff 复核：vs <code>upstream/main</code> 仅 3 文件、+216/−2，无泄漏无关改动。</li>
+              <li>Diff 复核（clean_source 子提交 <code>39b53e6</code>）：vs <code>upstream/main</code> 仅 sync.lua + 测试 3 文件、+216/−2，无泄漏无关改动；UI 接线为后续独立提交 <code>e8df194</code>（见下方时间线项）。</li>
             </ul>
           </div>
           <div class="k">风险 / 未决</div>
@@ -99,13 +99,52 @@
         </div>
       </div>
     </div>
+
+    <div class="tl-item">
+      <div class="tl-date">2026-08-14（续）</div>
+      <div class="tl-title">UI 接线：重注菜单可选干净原书，clean_source 在真机可触发</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">clean_source 逃生舱已在 <code>Sync.run</code> 就绪，但设备上「重新注入(用上次数据,离线)」菜单无法指定干净源，导致该逃生舱在真机上仍不可触发——用户卡点未真正解除。</div>
+          <div class="k">具体改动</div>
+          <div class="v">
+            <ul>
+              <li><code>main.lua</code> 新增 <code>reinject_with_clean(path)</code>：弹 ConfirmBox 提供「选择干净原书」(复用既有 <code>pick_book</code>/<code>PathChooser</code>) 与「直接重注(用现有备份)」两条路径；选定干净原书后 <code>sync_entry(path,"reinject",{clean_source=...})</code>。</li>
+              <li><code>_start_sync_task</code> 将 <code>opts.clean_source</code> 透传进 worker task 表。</li>
+              <li><code>SyncTask:start</code> 捕获 <code>task.clean_source</code> 作为闭包上值，透传给子进程 worker 的 <code>Sync.run{clean_source=...}</code>。</li>
+              <li>两处重注菜单项（阅读器 / 文件管理器）回调改为 <code>reinject_with_clean</code>。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅新增菜单分支与参数透传；未选干净源时完全走旧逻辑（依赖 <code>.orig</code>）。向后兼容、无破坏性。</div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（main.lua / sync_task.lua / sync.lua）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 157 passed / 0 failed</span>，UI 改动无回归。</li>
+              <li>设备数据动态验证：<span class="ok">通过</span> —— 以《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（<code>1.json</code> 含 45 条划线）跑通：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code>。</li>
+            </ul>
+          </div>
+          <div class="k">风险 / 未决</div>
+          <div class="v">
+            <ul>
+              <li>UI 接线涉及 KOReader 控件（ConfirmBox/PathChooser），受沙箱限制仅做语法 + 套件 + 逻辑追踪核验；建议真机点一次「重新注入 → 选择干净原书」做冒烟。</li>
+              <li>《神秘复苏》真机恢复操作（用干净原书重注）仍须副本验证通过后另行授权，不在本 PR 自动执行。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <h2>改动文件清单（vs upstream/main）</h2>
   <table>
     <thead><tr><th>文件</th><th>类型</th><th>行数</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+40 / −2</td><td>clean_source 解析、校验、固化 .orig 逻辑</td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+42 / −3</td><td>clean_source 解析、校验、固化 .orig 逻辑</td></tr>
+      <tr><td><code>pickthought.koplugin/main.lua</code></td><td>修改</td><td>+28 / −3</td><td>新增 <code>reinject_with_clean</code>；重注菜单项改为触发它；<code>_start_sync_task</code> 透传 <code>opts.clean_source</code></td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/sync_task.lua</code></td><td>修改</td><td>+4</td><td>捕获 <code>task.clean_source</code> 上值并透传给 <code>Sync.run</code></td></tr>
       <tr><td><code>tests/run.lua</code></td><td>修改</td><td>+1</td><td>将新测试接入 files 列表</td></tr>
       <tr><td><code>tests/test_sync_clean_source.lua</code></td><td>新增</td><td>+175</td><td>6 个用例覆盖干净源全量重建 / 缺失 / 已注入 / 复制失败 / 等同 doc_path / 等同 backup</td></tr>
     </tbody>
@@ -115,10 +154,11 @@
   <table>
     <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
     <tbody>
-      <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl sync.lua</code></td></tr>
-      <tr><td>测试套件</td><td class="ok">157 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录）</td></tr>
+      <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl</code> sync.lua / main.lua / sync_task.lua</td></tr>
+      <tr><td>测试套件</td><td class="ok">157 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 6 个新用例）</td></tr>
       <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
-      <tr><td>Diff 复核</td><td class="ok">通过</td><td>仅 3 文件，无泄漏</td></tr>
+      <tr><td>设备数据动态验证</td><td class="ok">通过</td><td>《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（45 划线）：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code></td></tr>
+      <tr><td>Diff 复核</td><td class="ok">通过</td><td>5 文件（+245/−5），无泄漏无关改动</td></tr>
     </tbody>
   </table>
 
