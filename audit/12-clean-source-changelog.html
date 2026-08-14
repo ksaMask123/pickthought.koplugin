@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pickthought.koplugin — clean_source 逃生舱 更新日志</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --txt:#d7dce5; --dim:#8b93a3; --accent:#5b9dff; --good:#4cc38a;
+    --warn:#e0a458; --bad:#e06c75; --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6;font-size:14px}
+  .wrap{max-width:920px;margin:0 auto;padding:28px 22px 60px}
+  h1{font-size:21px;margin:0 0 4px;color:#fff}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:18px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .panel2{background:var(--panel2)}
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:13px}
+  .kv .k{color:var(--dim)}
+  .kv .v{color:var(--txt)}
+  code{font-family:var(--mono);background:#0b0d11;border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:12.5px;color:#cfe3ff}
+  .badge{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:20px;border:1px solid var(--border);color:var(--dim);margin-right:6px}
+  .b-good{color:var(--good);border-color:#274b3c;background:#10231b}
+  .b-acc{color:var(--accent);border-color:#284766;background:#0f1d2e}
+  .b-warn{color:var(--warn);border-color:#4a3a1f;background:#241d10}
+  h2{font-size:15px;margin:22px 0 8px;color:#fff;border-left:3px solid var(--accent);padding-left:9px}
+  ul{margin:6px 0 6px;padding-left:20px}
+  li{margin:4px 0}
+  .timeline{position:relative;margin-left:8px;padding-left:22px;border-left:2px solid var(--border)}
+  .tl-item{position:relative;margin:0 0 4px}
+  .tl-item::before{content:"";position:absolute;left:-29px;top:6px;width:11px;height:11px;border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+  .tl-date{font-family:var(--mono);font-size:12.5px;color:var(--accent);font-weight:600}
+  .tl-title{font-weight:600;color:#fff;margin:1px 0 2px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--dim);font-weight:600;background:var(--panel2)}
+  .ok{color:var(--good)} .no{color:var(--bad)}
+  .note{font-size:12.5px;color:var(--dim);margin-top:6px}
+  .foot{color:var(--dim);font-size:12px;margin-top:26px;border-top:1px solid var(--border);padding-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>撷思 pickthought.koplugin · 更新日志</h1>
+  <div class="sub">离线优先的本地 EPUB 微信读书想法/划线注入器 · 专属 HTML 时间线（按时间线记录备查）</div>
+
+  <div class="panel panel2">
+    <div class="kv">
+      <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）</div>
+      <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (38c352c)</div>
+      <div class="k">提交</div><div class="v"><code>39b53e6</code> feat(sync): 外部干净源绕开脏/缺失 .orig 的 clean_source 逃生舱</div>
+      <div class="k">改动文件</div><div class="v">3 个：<code>sync.lua</code> (+40/−2)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync_clean_source.lua</code> (新增 175 行)</div>
+      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 157/0</span><span class="badge b-acc">含 6 个新用例</span></div>
+    </div>
+  </div>
+
+  <h2>时间线</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-date">2026-08-14</div>
+      <div class="tl-title">clean_source 逃生舱（只做 A，解卡点）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">原设计两处硬编码：① <code>.orig</code> 作为唯一干净源；② <code>api:chapters</code> 作为唯一章节枚举。当《神秘复苏》重注时原书已被注入（<code>.orig</code> 被污染）且本地无干净备份，<code>Sync.run</code> 直接报错退出，离线重注卡死。</div>
+          <div class="k">决策</div>
+          <div class="v">经评估，① 与 ② 的原始设计意图均合理（就地替换 + 自管理备份 的幂等模型；在线优先、权威章节对齐），应<b>扩展逃生舱</b>而非重写。仅实现 <b>A（干净源逃生舱）</b>解当前卡点；<b>B（离线章节枚举）</b>需新增 SQLite 下划线缓存（大改动），暂缓。</div>
+          <div class="k">具体改动</div>
+          <div class="v">
+            <ul>
+              <li><code>Sync.run</code> 新增可选 <code>deps.clean_source</code>（外部干净 <code>.epub</code> 路径），经<b>存在性 / 非注入版 / 非自身</b> 三项校验后，作为注入源绕开脏/缺失的 <code>.orig</code>。</li>
+              <li>通过 <code>deps.copy_file</code>（默认 <code>U.copy_file</code>，带 Windows 覆盖回退）将干净源<b>固化</b>为 <code>.orig</code> 备份，且不破坏用户原书。</li>
+              <li>复制失败<b>仅告警、不致命</b>：注入版已生成，仅后续重注需再次指定干净源。</li>
+              <li>报告表新增 <code>clean_source</code> 字段；默认行为完全不变（未传该参数时走既有路径）。</li>
+              <li>测试：新增 <code>tests/test_sync_clean_source.lua</code>（6 case），并接入 <code>tests/run.lua</code> 的 files 列表。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅影响 <code>Sync.run</code> 的<b>源选择分支</b>；在线同步、划线/想法缓存（thought_db）、注入标记、UI 均<b>未改动</b>。无破坏性、向后兼容。</div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法校验：<span class="ok">通过</span>（<code>luajit -bl sync.lua</code>）。</li>
+              <li>加载期校验：<span class="ok">通过</span>（<code>require</code> 全量测试套件无加载错误）。</li>
+              <li>运行期校验：<span class="ok">全量测试 157 passed / 0 failed</span>（上游 18 个测试文件全绿 + 新增 6 个 clean_source 用例）。</li>
+              <li>Diff 复核：vs <code>upstream/main</code> 仅 3 文件、+216/−2，无泄漏无关改动。</li>
+            </ul>
+          </div>
+          <div class="k">风险 / 未决</div>
+          <div class="v">
+            <ul>
+              <li><b>B 方案（离线章节枚举）</b>暂缓：本地缓存仅存想法、未存下划线，需先补齐下划线缓存方可离线重注（大改动，另行排期）。</li>
+              <li><b>《神秘复苏》设备恢复</b>：需用户提供一份干净的《神秘复苏》原书 <code>.epub</code>，以 <code>clean_source</code> 指入重注；该设备操作单独授权，不在本 PR 内。</li>
+              <li>本分支本地提交采用手动写入 loose-ref（环境 <code>.git/refs/heads/pr/</code> 子目录创建受限），已验证持久化正常。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>改动文件清单（vs upstream/main）</h2>
+  <table>
+    <thead><tr><th>文件</th><th>类型</th><th>行数</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+40 / −2</td><td>clean_source 解析、校验、固化 .orig 逻辑</td></tr>
+      <tr><td><code>tests/run.lua</code></td><td>修改</td><td>+1</td><td>将新测试接入 files 列表</td></tr>
+      <tr><td><code>tests/test_sync_clean_source.lua</code></td><td>新增</td><td>+175</td><td>6 个用例覆盖干净源全量重建 / 缺失 / 已注入 / 复制失败 / 等同 doc_path / 等同 backup</td></tr>
+    </tbody>
+  </table>
+
+  <h2>四重自检结论</h2>
+  <table>
+    <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
+    <tbody>
+      <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl sync.lua</code></td></tr>
+      <tr><td>测试套件</td><td class="ok">157 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录）</td></tr>
+      <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
+      <tr><td>Diff 复核</td><td class="ok">通过</td><td>仅 3 文件，无泄漏</td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    本日志为 pickthought.koplugin 的专属更新时间线，遵循「改完即记录、随改随追、不积压」纪律。
+    本特性 PR 基于上游 <code>Mr54233/pickthought.koplugin:main</code>，不进 fork <code>main</code> 的审计目录；
+    配套 HTML 更新日志（即本文件）随代码推送同步提交至 fork <code>main</code> 的 <code>audit/</code> 下。
+  </div>
+</div>
+</body>
+</html>
