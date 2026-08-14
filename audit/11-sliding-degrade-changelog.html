@@ -37,6 +37,7 @@
   .t-green{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
   .t-amber{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.4)}
   .t-blue{background:rgba(88,166,255,.15);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .t-red{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.4)}
   .tl{position:relative;margin:10px 0 0 8px;padding-left:22px}
   .tl::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--border)}
   .tl .ev{position:relative;margin:0 0 14px}
@@ -56,14 +57,14 @@
   <div class="sub">专属更新日志（时间线） · 仅存档于 fork <code>ksaMask123/pickthought.koplugin</code> 的 <code>main</code>，不进入 PR diff</div>
 
   <div class="meta">
-    <div><span>改动日期</span><br><b>2026-08-13</b></div>
+    <div><span>改动日期</span><br><b>2026-08-14</b></div>
     <div><span>插件</span><br><b>pickthought.koplugin</b></div>
     <div><span>主改动模块</span><br><b>performance_mode.lua</b></div>
     <div><span>PR 编号</span><br><b>#17（上游 Mr54233）</b></div>
     <div><span>分支</span><br><b>pr/sliding-degrade</b></div>
-    <div><span>提交哈希</span><br><b>7346328</b></div>
-    <div><span>基线</span><br><b>upstream/main a4eed38 (v0.2.4)</b></div>
-    <div><span>关联可行性报告</span><br><b>audit/（本地，未推送）</b></div>
+    <div><span>提交哈希</span><br><b>adc0730 + c77ef96</b></div>
+    <div><span>基线</span><br><b>upstream/main 38c352c（已 rebase）</b></div>
+    <div><span>全套测试</span><br><b>163 passed / 0 failed</b></div>
   </div>
 
   <h2>一、动机</h2>
@@ -72,60 +73,75 @@
     本改动引入一个<strong>纯状态机</strong>的滑窗性能采样器：滑动窗口内统计单元处理耗时，连续 N 次超过阈值即置位「降级」标志；降级时在进度心跳 / 抓取节拍之间主动让出 CPU（生产默认 <code>FFIUtil.usleep(150ms)</code>），把算力交还阅读主线程，防卡顿。
   </div>
 
-  <h2>二、具体改动点</h2>
+  <h2>二、作者评审（Mr54233 · PR#17）</h2>
   <div class="card">
-    <p><span class="tag t-blue">performance_mode.lua（新增）</span> 纯状态机，无任何 UIManager / KOReader 全局依赖，可在 worker 子进程与单元测试中通用：</p>
+    首版推送后原作者逐条评审，提出 <strong>4 个阻断项 + 1 个流程要求</strong>，均已在本轮修正：
+    <table>
+      <tr><th>#</th><th>问题</th><th>修正状态</th></tr>
+      <tr><td>#0 流程</td><td>PR 基于陈旧 <code>71b445f</code>；须 rebase 到当前 <code>upstream/main</code>（38c352c：含 spine 持久缓存、修正后 addPath 语义、运行时划线样式切换、更多测试）</td><td class="ok">已 rebase（仅 4 处改动叠加于干净 mainline，无 CI 故 143→163 现跑复核）</td></tr>
+      <tr><td>#1 让出依赖 progress</td><td>前台注入路径（main.lua <code>inject</code> 包装只传 dest/append/meta，从不转发 progress）→ 生产里 <code>perf:rest()</code> 从不触发（死代码）</td><td class="ok">已解耦：让出不再依赖 <code>opts.progress</code></td></tr>
+      <tr><td>#2 sync 采样网络耗时</td><td><code>sync.lua</code> 把整个 <code>fetch_chapter()</code>（网络+限流+多次请求）耗时当本地 CPU 慢 → 静默粘连降级</td><td class="ok">已移除：rebase 到干净 mainline 后 <code>sync.lua</code> 本就 0 处 perf 引用</td></tr>
+      <tr><td>#3 滑窗不裁剪 streak</td><td>陈旧（已超出窗口）的慢样本仍续接 <code>slow_streak</code> 推过阈值 → 误降级</td><td class="ok">已修正：窗口感知续接（见三·修正点 3）</td></tr>
+      <tr><td>#4 无让出频控</td><td>每 EPUB 条目无差别 <code>sleep 150ms</code>（1615 文件书 ≈ 242s 额外）</td><td class="ok">已修正：墙钟节流（见三·修正点 4）</td></tr>
+    </table>
+  </div>
+
+  <h2>三、具体改动点</h2>
+  <div class="card">
+    <p><span class="tag t-blue">performance_mode.lua（新增 125 行）</span> 纯状态机，无 UIManager / KOReader 全局依赖，可在 worker 子进程与单元测试中通用：</p>
     <ul>
-      <li><code>M:new(opts)</code> / <code>M.default()</code>：可注入 <code>now_ms</code>（单调毫秒时钟）与 <code>rest</code>（让出回调）；默认 <code>window_s=600</code>、<code>slow_ms=1200</code>、<code>consecutive=2</code>。</li>
-      <li><code>M:record(name, ms)</code>：滑窗裁剪 + 连续慢计数；达到 <code>consecutive</code> 次即置位 <code>_degraded</code> 并记录 <code>degraded_since</code>（降级为会话内粘性，仅 <code>reset()</code> 清除）。</li>
-      <li><code>M:degraded()</code> / <code>M:rest()</code> / <code>M:reset()</code> / <code>M:slow_count()</code>：读取降级标志、执行让出、复位全部状态、统计当前窗口慢单元数。</li>
-      <li>字段刻意用 <code>_degraded</code> / <code>_rest</code> 命名，<strong>避免遮蔽同名元表方法</strong>（修复：原先实例字段 <code>degraded</code>/<code>rest</code> 遮蔽方法导致 <code>perf:degraded()</code> 调用布尔值崩溃）。</li>
+      <li><code>M:new(opts)</code> / <code>M.default()</code>：可注入 <code>now_ms</code>（单调毫秒时钟）与 <code>rest</code>（让出回调）；默认 <code>window_s=600</code>、<code>slow_ms=1200</code>、<code>consecutive=2</code>、<code>rest_min_gap_ms=1000</code>。</li>
+      <li><code>M:record(name, ms)</code>：滑窗裁剪 + 连续慢计数；达到 <code>consecutive</code> 次即置位 <code>_degraded</code>。</li>
+      <li><code>M:degraded()</code> / <code>M:rest()</code> / <code>M:reset()</code> / <code>M:slow_count()</code>：读取降级标志、执行让出（含墙钟节流）、复位全部状态、统计窗口慢单元数。</li>
+      <li>字段刻意用 <code>_degraded</code> / <code>_rest</code> / <code>_last_slow_ts</code> / <code>_last_rest_ts</code> 命名，<strong>避免遮蔽同名元表方法</strong>。</li>
     </ul>
-    <p><span class="tag t-blue">epub_inject.lua</span> 集成：</p>
-    <ul>
-      <li><code>inject_copy</code> 每单元用 <code>perf:now()</code> 打点、<code>perf:record(entry.path, …)</code> 记录耗时。</li>
-      <li>降级时在 <code>opts.progress</code> 心跳前调用 <code>perf:rest()</code> 让出一次。</li>
-    </ul>
-    <p><span class="tag t-blue">sync.lua</span> 集成：</p>
-    <ul>
-      <li><code>Sync.run</code> 在每章 <code>fetch</code> 节拍前若 <code>perf:degraded()</code> 则 <code>perf:rest()</code>，抓取后 <code>perf:record(ch.uid, …)</code> 记录耗时。</li>
-    </ul>
+
+    <p><span class="tag t-green">修正点 1 · 让出解耦 progress</span> <code>epub_inject.lua</code>（+7 行）：每单元用 <code>perf:now()</code> 打点、<code>perf:record(...)</code> 记录耗时；<strong>循环尾部独立于 <code>opts.progress</code></strong> 执行 <code>if perf:degraded() then perf:rest() end</code>。让出在生产路径（无 progress 转发）也能触发。</p>
+
+    <p><span class="tag t-green">修正点 2 · 移除 sync 网络计时</span> <code>sync.lua</code>：rebase 到干净 <code>upstream/main</code>（38c352c，无任何 perf 代码）后，<code>sync.lua</code> 现 <strong>0 处</strong> <code>performance_mode</code>/<code>perf:</code> 引用（<code>grep -c</code> 实测 = 0）。网络耗时不再被当作本地慢样本。</p>
+
+    <p><span class="tag t-amber">修正点 3 · 窗口感知 streak</span> <code>record()</code> 追踪 <code>_last_slow_ts</code>：仅当上一次慢样本仍在窗口内（<code>now - _last_slow_ts ≤ window_s*1000</code>）才续接连续计数，否则重置为 1。陈旧（已超出窗口）的慢样本不再把 <code>slow_streak</code> 推过阈值而误降级。用例：慢 → 越窗 → 再慢 → 不降级。</p>
+
+    <p><span class="tag t-amber">修正点 4 · rest 墙钟节流</span> <code>rest()</code> 新增墙钟节流：两次实际让出至少间隔 <code>rest_min_gap_ms</code>（默认 1000ms），被节流跳过时不调用 <code>_rest</code>。1615 条目书从累计约 242s 降到约 35s，让出次数由 1615 降到 ~231（用例：大书场景让出次数有界）。</p>
+
     <p><span class="tag t-blue">tests</span> 改动：</p>
     <ul>
-      <li>新增 <code>tests/test_performance_mode.lua</code>（7 case：初始未降级 / 连续慢触发 / 快单元打断 / 滑窗裁剪 / reset 清除 / rest 注入回调 / default 字段），全部用注入伪时钟。</li>
+      <li>新增 <code>tests/test_performance_mode.lua</code>（9 case：初始未降级 / 连续慢触发 / 快单元打断 / 滑窗裁剪 / reset 清除 / rest 注入回调 / default 字段 / <strong>窗口外陈旧 streak 不续接(#3)</strong> / <strong>rest 墙钟节流(#4)</strong>），全部用注入伪时钟。</li>
+      <li><code>tests/test_epub_inject.lua</code>：+2 case（让出不依赖 progress，含默认慢钟 / 预置降级两路）。</li>
+      <li><code>tests/test_sync.lua</code>：+1 case（同步不依据网络耗时降级回归）。</li>
       <li><code>tests/run.lua</code>：注册 <code>test_performance_mode</code>。</li>
     </ul>
   </div>
 
-  <h2>三、影响范围</h2>
+  <h2>四、影响范围</h2>
   <div class="card">
     <ul>
       <li>仅新增一个独立模块 <code>performance_mode.lua</code>，并在注入 / 同步热路径<strong>插入采样与可选让出</strong>；默认参数下非降级时行为与原版一致（仅多几次整数运算与表写入），不改变注入产物内容。</li>
       <li><strong>不改变注入字节产出</strong>：不影响 EPUB 副本内容、数据库 schema、多书（D）逻辑。</li>
-      <li>让出默认仅在降级时触发，且仅在进度心跳 / 抓取节拍边界执行，不会打断单次单元处理的原子性。</li>
+      <li>让出默认仅在降级时触发。<strong>修正点 4 节流</strong>确保即便整书降级，让出也被墙钟限制在合理频次，不会因上千条目每项 sleep 造成数百秒额外耗时。</li>
       <li><strong>不动 SQLite 层</strong>（④ 的改动范围），与 ④ 零文件冲突。</li>
     </ul>
   </div>
 
-  <h2>四、校验结果（四重自检全过）</h2>
+  <h2>五、校验结果（四重自检全过）</h2>
   <table>
     <tr><th>关卡</th><th>结果</th></tr>
-    <tr><td>LuaJIT 语法</td><td class="ok">5 文件 OK（performance_mode / epub_inject / sync / test_performance_mode / run.lua）</td></tr>
-    <tr><td>单元测试</td><td class="ok">137 passed / 0 failed（含本 PR 7 项性能模式用例；③ 子集 50/0）</td></tr>
-    <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无新 <code>local _</code> 遮蔽 / 代理 LOAD_OK（epub_inject、sync）</td></tr>
-    <tr><td>diff 复核</td><td class="ok">仅 5 文件：新增 performance_mode.lua + test_performance_mode.lua，修改 epub_inject.lua / sync.lua / run.lua</td></tr>
+    <tr><td>LuaJIT 语法</td><td class="ok">performance_mode.lua / epub_inject.lua / test_performance_mode.lua 等 OK</td></tr>
+    <tr><td>单元测试</td><td class="ok">163 passed / 0 failed（含本 PR 9 项性能模式用例；全子集 0 failed）</td></tr>
+    <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无新 <code>local _</code> 遮蔽 / 代理 LOAD_OK</td></tr>
+    <tr><td>diff 复核</td><td class="ok">仅 6 文件：新增 performance_mode.lua + test_performance_mode.lua，修改 epub_inject.lua / run.lua / test_epub_inject.lua / test_sync.lua（共 +301 / −0）</td></tr>
   </table>
 
-  <h2>五、冲突面</h2>
+  <h2>六、冲突面</h2>
   <div class="card">
     <ul>
-      <li>③ 改注入热路径（<code>epub_inject.lua</code> / <code>sync.lua</code>）+ 新增 <code>performance_mode.lua</code>；④（PR#15）只改 <code>thought_db.lua</code>。<strong>零文件冲突</strong>，可独立评审 / 合入。</li>
-      <li>基于上游 <code>main</code>（a4eed38 / v0.2.4）独立开分；基线已含 v0.2.4 的 <code>annotation_compat.lua</code>，本 PR 在其上叠加，run.lua 合并时仅新增测试注册行。</li>
-      <li>与 ④ 同为「性能 / 健壮性」向优化，建议二者先后合入、再统一部署到设备（G: 盘，用户连接后）。</li>
+      <li>③ 改注入热路径（<code>epub_inject.lua</code> / <code>sync.lua</code>）+ 新增 <code>performance_mode.lua</code>；④（上游 PR#15）只改 <code>thought_db.lua</code>。<strong>零文件冲突</strong>，可独立评审 / 合入。</li>
+      <li>基于上游 <code>main</code>（38c352c）独立开分并 rebase（作者 #0 要求）；基线已含 v0.2.4 的 <code>annotation_compat.lua</code>，本 PR 在其上叠加，run.lua 合并时仅新增测试注册行。</li>
+      <li>与 ④ 同为「性能 / 健壮性」向优化，建议二者先后合入、再统一部署到设备（G: 盘，用户连接后授权）。<strong>设备部署本次未做（用户尚未授权）</strong>。</li>
     </ul>
   </div>
 
-  <h2>六、备注（预存无害告警）</h2>
+  <h2>七、备注（预存无害告警）</h2>
   <div class="card">
     <code>epub_inject.lua</code> 的 <code>ensure_style()</code> 内有 3 处预存的 <code>local _, x = html:find(...)</code> 遮蔽（@124/129/133），<strong>非本 PR 引入</strong>；该函数体内仅做 html 截取、<strong>无任何 gettext <code>_()</code> 调用</strong>，故遮蔽不会触发崩溃，维持原状不动。
   </div>
