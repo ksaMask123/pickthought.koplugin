@@ -50,9 +50,9 @@
     <div class="kv">
       <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
       <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (38c352c)</div>
-      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标</div>
-      <div class="k">改动文件</div><div class="v">5 个：<code>sync.lua</code> (+70/−7)、<code>main.lua</code> (+28)、<code>sync_task.lua</code> (+4)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync_clean_source.lua</code> (新增 224)</div>
-      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 158/0</span><span class="badge b-acc">含 7 个新用例</span><span class="badge b-acc">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2)</div>
+      <div class="k">改动文件</div><div class="v">6 个：<code>sync.lua</code> (+143/−11)、<code>main.lua</code> (+34)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+24，新增流式复制)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync_clean_source.lua</code> (新增 380)</div>
+      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 163/0</span><span class="badge b-acc">含 12 个新用例</span><span class="badge b-acc">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
     </div>
   </div>
 
@@ -178,15 +178,55 @@
       </div>
     </div>
 
+    <div class="tl-item">
+      <div class="tl-date">2026-08-14（评审二轮 · CHANGES_REQUESTED 最终轮）</div>
+      <div class="tl-title">落实原作者 Mr54233 最新评审四项修复（P1×3 + P2，提交 c6d20d8）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-14 对 PR #20 提出 CHANGES_REQUESTED，指出上一轮（4a91c12）仍有四处合并前需处理的问题：大书 OOM、回滚谎报、干净原书被误删、映射缓存指纹未用干净源。</div>
+          <div class="k">P1#1 流式复制防 OOM</div>
+          <div class="v"><code>util.lua</code> 新增 <code>U.copy_file_stream</code>（1MB 分块读写 + 可选 <code>on_progress</code> 心跳）；<code>Sync.run</code> 默认 <code>copy_file</code> 改用它，避免 <code>U.copy_file</code> 的 <code>read("*a")</code> 一次性读入整本 EPUB 触发 KPW3/KPW4 OOM，并在复制过程上报进度/心跳防被误判无响应。</div>
+          <div class="k">P1#2 回滚结果检查 + 如实报错</div>
+          <div class="v">新增 <code>try_recover</code> 统一封装，固化失败与 swap 失败的回滚均<b>检查 rename 返回值</b>；恢复失败明确告知当前文件实际位置（<code>.old</code> / <code>.orig</code>）并保留作人工恢复入口，杜绝「doc_path 实际不存在、.old 仍残留却返回『已恢复原注入版』」的谎报。</div>
+          <div class="k">P1#3 干净原书不再被误删</div>
+          <div class="v">clean source 流程先确认当前 doc_path 确为注入版（含 <code>MARKER</code>）；若仍是干净原书（如首次注入中途失败，仅有章节缓存），则<b>保留为 .orig 备份</b>而非丢进 .old 销毁，避免不同版本原书永久丢失。<code>main.lua:_has_reinject_cache</code> 增加 .orig 存在性守卫，干净原书不再误提供「重新注入」。</div>
+          <div class="k">P2 映射缓存指纹纳入干净源</div>
+          <div class="v">指定 clean_source 重建时，<code>map_signature</code> 纳入干净源规范化路径，避免不同 EPUB 同体积复用旧 spine/映射缓存；无 clean_source 时签名格式保持兼容（不改既有缓存）。</div>
+          <div class="k">测试补强（新增 5 用例，共 12）</div>
+          <div class="v">
+            <ul>
+              <li><code>.orig</code> 固化失败且回滚失败 → 明确告知 .old 位置、不谎称已恢复；</li>
+              <li>swap 失败且回滚失败 → 明确告知实际位置；</li>
+              <li>当前书未注入但含章节缓存 → 保留为 .orig、不丢原书；</li>
+              <li><code>U.copy_file_stream</code> 流式复制分块/进度/失败（2.5MB &gt; 1MB 分块、内容一致、多次进度、源缺失报错）；</li>
+              <li>启动前遗留 .old 应被清理、不阻塞重建。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（util.lua / sync.lua / main.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 163 passed / 0 failed</span>（较 158 新增 5 用例）。</li>
+              <li>Diff 复核：二轮增量仅 4 文件（+278/−27），累计 vs upstream/main 6 文件 +575/−11，无泄漏无关改动。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅扩展 clean_source 重建分支与恢复逻辑、默认复制改流式、映射签名扩展、菜单守卫；未传 <code>clean_source</code> 时完全走既有路径，向后兼容、无破坏性。</div>
+        </div>
+      </div>
+    </div>
+
   <h2>改动文件清单（vs upstream/main）</h2>
   <table>
     <thead><tr><th>文件</th><th>类型</th><th>行数</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+70 / −7</td><td>clean_source 解析、校验、固化 .orig 逻辑；<code>4a91c12</code> 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标</td></tr>
-      <tr><td><code>pickthought.koplugin/main.lua</code></td><td>修改</td><td>+28 / −3</td><td>新增 <code>reinject_with_clean</code>；重注菜单项改为触发它；<code>_start_sync_task</code> 透传 <code>opts.clean_source</code></td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+143 / −11</td><td>clean_source 解析、校验、固化 .orig 逻辑；<code>4a91c12</code> 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标；<code>c6d20d8</code> 评审二轮：流式复制、try_recover 统一回滚、干净原书保留为 .orig、map_signature 纳入干净源</td></tr>
+      <tr><td><code>pickthought.koplugin/main.lua</code></td><td>修改</td><td>+34</td><td>新增 <code>reinject_with_clean</code>；重注菜单项改为触发它；<code>_start_sync_task</code> 透传 <code>opts.clean_source</code>；<code>_has_reinject_cache</code> 增加 .orig 存在性守卫（P1#3）</td></tr>
       <tr><td><code>pickthought.koplugin/pickthought/sync_task.lua</code></td><td>修改</td><td>+4</td><td>捕获 <code>task.clean_source</code> 上值并透传给 <code>Sync.run</code></td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/util.lua</code></td><td>修改</td><td>+24</td><td>新增 <code>U.copy_file_stream</code>（1MB 分块 + 进度心跳，防 OOM，P1#1）</td></tr>
       <tr><td><code>tests/run.lua</code></td><td>修改</td><td>+1</td><td>将新测试接入 files 列表</td></tr>
-      <tr><td><code>tests/test_sync_clean_source.lua</code></td><td>新增</td><td>+224</td><td>7 个用例：干净源全量重建 / 缺失 / 已注入 / 固化失败回滚 / 等同 doc_path / 等同 backup / 脏 doc_path 先让位 swap 回归</td></tr>
+      <tr><td><code>tests/test_sync_clean_source.lua</code></td><td>新增</td><td>+380</td><td>12 个用例：干净源全量重建 / 缺失 / 已注入 / 固化失败回滚 / 等同 doc_path / 等同 backup / 脏 doc_path 先让位 swap 回归 / 固化失败+回滚失败 / swap失败+回滚失败 / 当前书未注入但含章节缓存 / 流式复制分块进度失败 / .old 遗留清理</td></tr>
     </tbody>
   </table>
 
@@ -195,11 +235,11 @@
     <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
     <tbody>
       <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl</code> sync.lua / main.lua / sync_task.lua</td></tr>
-      <tr><td>测试套件</td><td class="ok">158 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 7 个新用例）</td></tr>
+      <tr><td>测试套件</td><td class="ok">163 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 12 个新用例）</td></tr>
       <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
       <tr><td>设备数据动态验证</td><td class="ok">通过</td><td>《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（45 划线）：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code></td></tr>
       <tr><td>真机端到端验证</td><td class="ok">通过</td><td>KPW3 真机：干净原书 + 本地 sync-cache 离线重注成功；1617 份缓存 + 71,177 行想法无损还原；<code>crash.log</code> 无报错（结果已写入 PR #20 说明）</td></tr>
-      <tr><td>Diff 复核</td><td class="ok">通过</td><td>5 文件（+320/−7 vs upstream/main），无泄漏无关改动</td></tr>
+      <tr><td>Diff 复核</td><td class="ok">通过</td><td>6 文件（+575/−11 vs upstream/main），无泄漏无关改动</td></tr>
     </tbody>
   </table>
 

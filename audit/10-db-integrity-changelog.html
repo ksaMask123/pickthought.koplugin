@@ -35,9 +35,9 @@
     <div>日期</div><div>2026-08-14</div>
     <div>PR</div><div><a href="https://github.com/Mr54233/pickthought.koplugin/pull/15">#15 DB 完整性校验与 WAL 折叠</a></div>
     <div>上游 base</div><div><code>upstream/main</code> <code>38c352c</code></div>
-    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>5ecbf3b</code></div>
+    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>82af014</code></div>
     <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 已落实全部意见</div>
-    <div>单测</div><div><span class="ok">159 passed / 0 failed</span></div>
+    <div>单测</div><div><span class="ok">DB 完整性用例 14/0</span>（分支基线较旧，全量套件待合入 upstream 后统一跑）</div>
     <div>设备部署</div><div><span class="warn">未部署</span>（待授权；本 PR 仅改 <code>thought_db.lua</code>，属 SQLite 层，部署风险低）</div>
   </div>
 
@@ -114,6 +114,22 @@
     <li>自动"从注入源重建"：确认损坏隔离后，若确有可恢复的 sync-cache / 离线缓存，可在上层触发重新注入；本 PR 仅交付"隔离 + 显式报错"安全路径。</li>
     <li>设备部署：待用户授权后外科手术式覆盖 <code>thought_db.lua</code> + 测试 + stubs（低风险，SQLite 层）。</li>
   </ul>
+
+  <h2>七、2026-08-14 评审二轮（CHANGES_REQUESTED 最终轮，提交 82af014）</h2>
+  <div class="box">
+    <b>动机</b>：作者复核上一轮（5ecbf3b）后指出仍有合并前需堵住的点——尤其"rename 实际失败也能通过"的测试缺口，以及 checkpoint / isolate_corrupt 的边界严谨度。<br>
+    <b>具体改动（6 处）</b>：
+    <ul>
+      <li><code>remove_db</code> 增加清理 <code>.isolated</code> 标记（避免残留标记误导后续打开）。</li>
+      <li><code>isolate_corrupt</code> 重写：主库 <code>os.rename</code> 失败返回 <code>nil</code>；<code>-wal/-shm</code> 仅当源存在才 rename 且失败返回错误；成功后写 <code>.isolated</code> 标记。</li>
+      <li><code>checkpoint</code> 改查 <code>row[1]</code>（busy）而非 <code>row[3]</code>，并校验 <code>log == ckpt</code>，busy / 不完整均判失败并 warn。</li>
+      <li><code>do_open</code> 去掉 <code>ensure_schema</code>（不再写 schema / user_version）。</li>
+      <li><code>open</code> 重写：先 <code>is_isolated</code> 守卫禁止自动建库 → <code>do_open</code> → 无写入 <code>integrity_check</code> → 健康才 <code>PRAGMA journal_mode/WAL</code> + <code>ensure_schema</code> + 清 <code>.isolated</code>；损坏 / 过程失败路径用新增 <code>close_no_checkpoint</code>（不 checkpoint 以免污染证据）。</li>
+      <li>新增 <code>close_no_checkpoint</code>。</li>
+    </ul>
+    <b>测试补强（真实文件级，堵住 rename 失败漏网）</b>：<code>test_thought_db_integrity.lua</code> 增强 <code>spy_os</code>（记录真实 rename 并执行）、新增 <code>tmp_dir/rm_tmp/file_exists</code> 真实文件辅助；替换"确认损坏"用例为真实文件版（断言主库 / WAL / SHM 真被移走、<code>.corrupt-*</code> / <code>-wal</code> / <code>-shm</code> / <code>.isolated</code> 真实存在）；新增「隔离态禁止自动建库」「checkpoint busy / 不完整 / 成功」「isolate_corrupt 成功 / sidecar 失败」共 6 新用例。DB 完整性用例 <span class="ok">14 passed / 0 failed</span>。<br>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code> 打开 / 关闭 / 隔离路径，未引入破坏性变更，向后兼容。
+  </div>
 
   <p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 4 个源/测试文件。</p>
 </div>

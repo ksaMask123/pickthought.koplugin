@@ -62,9 +62,9 @@
     <div><span>主改动模块</span><br><b>performance_mode.lua</b></div>
     <div><span>PR 编号</span><br><b>#17（上游 Mr54233）</b></div>
     <div><span>分支</span><br><b>pr/sliding-degrade</b></div>
-    <div><span>提交哈希</span><br><b>adc0730 + c77ef96</b></div>
+    <div><span>提交哈希</span><br><b>adc0730 + c77ef96 + aa758fb</b></div>
     <div><span>基线</span><br><b>upstream/main 38c352c（已 rebase）</b></div>
-    <div><span>全套测试</span><br><b>163 passed / 0 failed</b></div>
+    <div><span>全套测试</span><br><b>本分支 63 passed / 0 failed（含本 PR 9 项性能模式用例；分支基线较旧，全量套件待合入 upstream 后统一跑）</b></div>
   </div>
 
   <h2>一、动机</h2>
@@ -127,7 +127,7 @@
   <table>
     <tr><th>关卡</th><th>结果</th></tr>
     <tr><td>LuaJIT 语法</td><td class="ok">performance_mode.lua / epub_inject.lua / test_performance_mode.lua 等 OK</td></tr>
-    <tr><td>单元测试</td><td class="ok">163 passed / 0 failed（含本 PR 9 项性能模式用例；全子集 0 failed）</td></tr>
+    <tr><td>单元测试</td><td class="ok">本分支 63 passed / 0 failed（含本 PR 9 项性能模式用例；分支基线较旧，全量套件待合入 upstream 后统一跑）</td></tr>
     <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无新 <code>local _</code> 遮蔽 / 代理 LOAD_OK</td></tr>
     <tr><td>diff 复核</td><td class="ok">仅 6 文件：新增 performance_mode.lua + test_performance_mode.lua，修改 epub_inject.lua / run.lua / test_epub_inject.lua / test_sync.lua（共 +301 / −0）</td></tr>
   </table>
@@ -144,6 +144,18 @@
   <h2>七、备注（预存无害告警）</h2>
   <div class="card">
     <code>epub_inject.lua</code> 的 <code>ensure_style()</code> 内有 3 处预存的 <code>local _, x = html:find(...)</code> 遮蔽（@124/129/133），<strong>非本 PR 引入</strong>；该函数体内仅做 html 截取、<strong>无任何 gettext <code>_()</code> 调用</strong>，故遮蔽不会触发崩溃，维持原状不动。
+  </div>
+
+  <h2>八、2026-08-14 评审二轮（CHANGES_REQUESTED 最终轮，提交 aa758fb）</h2>
+  <div class="card">
+    <b>动机</b>：作者复核上一轮（c77ef96）后指出两处生产正确性问题——「整秒精度漏降级」与「前台阻塞」。<br>
+    <b>具体改动</b>：
+    <ul>
+      <li><b>整秒精度漏降级</b>：<code>make_default_clock</code> 原用整秒 <code>os.time()</code>，&lt;1s 的慢单元无法触发降级。改为拆分 <code>ffi/util.gettime()</code> 的秒 + 微秒合成完整毫秒（<code>math.floor(sec*1000 + usec/1000)</code>），并加<strong>回拨保护</strong>（当前值小于上一次时钳制为非递减），避免系统时间回拨导致采样异常。</li>
+      <li><b>前台阻塞</b>：<code>main.lua</code> 的 <code>_sync_run</code> 前台 inject 包装传入 <code>rest = function() end</code>（no-op），<strong>禁用阻塞式让出</strong>（前台同步时不应 <code>usleep</code> 阻塞阅读主线程）；降级让出仅在 worker 子进程 / 后台任务路径生效。</li>
+    </ul>
+    <b>测试补强</b>：新增「default 时钟：拆分秒+微秒得完整毫秒 + 回拨保护」「default rest 用 <code>fu.usleep</code>；前台回退可替换为 no-op 非阻塞」两用例（注意清 <code>package.loaded["ffi/util"]</code> 缓存以加载新桩）。<br>
+    <b>影响范围</b>：仅 <code>performance_mode.lua</code> 时钟实现与 <code>main.lua</code> 前台 injct 包装；注入产物内容不变，向后兼容。
   </div>
 
 </div>
