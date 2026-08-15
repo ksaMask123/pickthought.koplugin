@@ -35,8 +35,8 @@
     <div>日期</div><div>2026-08-14</div>
     <div>PR</div><div><a href="https://github.com/Mr54233/pickthought.koplugin/pull/15">#15 DB 完整性校验与 WAL 折叠</a></div>
     <div>上游 base</div><div><code>upstream/main</code> <code>38c352c</code></div>
-    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>82af014</code></div>
-    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 已落实全部意见</div>
+    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>9424a08</code></div>
+    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 复审三轮意见已落实（9424a08），待作者 flip</div>
     <div>单测</div><div><span class="ok">DB 完整性用例 14/0</span>（分支基线较旧，全量套件待合入 upstream 后统一跑）</div>
     <div>设备部署</div><div><span class="warn">未部署</span>（待授权；本 PR 仅改 <code>thought_db.lua</code>，属 SQLite 层，部署风险低）</div>
   </div>
@@ -131,7 +131,28 @@
     <b>影响范围</b>：仅 <code>thought_db.lua</code> 打开 / 关闭 / 隔离路径，未引入破坏性变更，向后兼容。
   </div>
 
-  <p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 4 个源/测试文件。</p>
+  
+  <h2>八、2026-08-15 评审三轮（提交 9424a08，隔离失败安全边界最终轮）</h2>
+  <div class="box">
+    <b>动机</b>：作者在 2026-08-15 对 PR #15 给出最后一轮意见，聚焦"隔离流程任一步失败都不能让下一次 open 得到一个新的空库"这一核心不变量，并指出备份目标名非真正唯一。<br>
+    <b>具体改动（3 处，仅 thought_db.lua + 测试）</b>：
+    <ul>
+      <li><code>isolate_corrupt</code> 改为<b>标记优先</b>：先写 <code>.isolated</code> 标记并校验成功，再逐个移动主库 / WAL / SHM（每步查 rename 返回值）；标记写入失败则中止、主库不动，二次 <code>open</code> 仍拒绝可用库。</li>
+      <li>新增 <code>unique_corrupt_target(base)</code>：生成 <code>.corrupt-&lt;ts&gt;-&lt;salt&gt;</code>，探测占用并在目标已存在时换名（盐值安全上限 9999），避免同秒多实例 / Kindle 上覆盖既有损坏备份。</li>
+      <li><code>is_isolated</code> 改为<b>标记优先</b>识别（主库仍存在也能识别标记），正确判定部分隔离态；sidecar 隔离中途失败不再回滚主库，主库保留于 <code>.corrupt-*</code> 作证据，同时标记仍在 → 下次 open 永不自动建空库。</li>
+    </ul>
+    <b>测试补强（新增 3 隔离边界用例，DB 完整性 14 → 17）</b>：
+    <ul>
+      <li>隔离中途 sidecar 失败：二次 <code>open</code> 仍阻断且不建空库（marker 保留）；</li>
+      <li><code>.isolated</code> 标记写入失败：不移动主库，二次 <code>open</code> 不建空库；</li>
+      <li>预建同名 <code>.corrupt-*</code>：新隔离操作换名，旧备份不被覆盖；</li>
+      <li>临时目录清理改为跨平台 <code>lfs</code> 实现（不再依赖 Windows <code>rmdir /s /q</code>）。</li>
+    </ul>
+    <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">168 passed / 0 failed</span>（含 DB 完整性 17/0，分支基线随 upstream 前进统一）。<br>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 标记路径与测试；未引入破坏性变更，向后兼容。
+  </div>
+
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 4 个源/测试文件。</p>
 </div>
 </body>
 </html>
