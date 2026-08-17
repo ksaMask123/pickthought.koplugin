@@ -49,10 +49,10 @@
   <div class="panel panel2">
     <div class="kv">
       <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
-      <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (38c352c)</div>
-      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点（不强制 .orig / 损坏中止 / 复制原子性 / 内容指纹）</div>
-      <div class="k">改动文件</div><div class="v">7 个：<code>sync.lua</code> (+184)、<code>main.lua</code> (+40)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+82，流式复制+内容指纹)、<code>tests/run.lua</code> (+1)、<code>tests/test_sync.lua</code> (+4)、<code>tests/test_sync_clean_source.lua</code> (新增 463，共 17 用例)</div>
-      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 168/0</span><span class="badge b-acc">含 17 个新用例</span><span class="badge b-acc">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
+      <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (a8c2e1f, v0.3.2) · 已 rebase 最新 main 并解决冲突（保留主线 test_sync_state / test_sync_gate / test_thought_popup / test_updater 测试）</div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希）</div>
+      <div class="k">改动文件</div><div class="v">9 个：<code>sync.lua</code> (+221)、<code>main.lua</code> (+46)、<code>binding.lua</code> (+11，新增 <code>offer_reinject</code> 纯判定)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+110，流式复制+内容指纹+路径哈希)、<code>tests/run.lua</code> (+1)、<code>tests/test_binding.lua</code> (+11)、<code>tests/test_sync.lua</code> (+4)、<code>tests/test_sync_clean_source.lua</code> (+509，共 19 用例)</div>
+      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 194/0</span><span class="badge b-acc">含 19 个 clean_source 用例</span><span class="badge b-acc">rebase 最新 main 后 24 个主线新增用例随行</span><span class="badge b-good">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
     </div>
   </div>
 
@@ -256,6 +256,48 @@
         </div>
       </div>
     </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-17（评审四轮 · 合并前收尾）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-17 第三轮 6 项边界（提交 5109fb6）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-17 对 PR #20 给出第四轮（合并前收尾）意见：肯定已实现流式复制 / 损坏保护 / 回滚校验 / 缓存指纹 / 遗留清理后，再指出 6 处边界需收尾；整体方向认可、已接近可合并。</div>
+          <div class="k">① 取消向上传递</div>
+          <div class="v"><code>Sync.run</code> 复制阶段（默认 <code>copy_file</code> 包装器 <code>U.copy_file_stream</code> + <code>step("copy")</code>）被取消时返回 <code>(nil,"已取消复制","cancelled")</code>，<code>Sync.run</code> 据此<b>中止</b>，不继续 .orig 固化与原书 swap；新增回归用例验证「取消后不执行最终 swap、.old 回滚为 doc_path」。</div>
+          <div class="k">② 恢复如实区分</div>
+          <div class="v">换位失败恢复新增 <code>recovered_from</code>（"old" / "clean"）跟踪；提示与实际文件状态一致：恢复的是干净原书（.orig→doc_path）明确说「已恢复干净原书」，恢复的是旧注入版（.old→doc_path）明确说「已恢复旧注入版」，<b>绝不谎称已恢复旧注入版</b>。</div>
+          <div class="k">③ 章节缓存仍可见入口</div>
+          <div class="v">抽出纯判定 <code>Binding.offer_reinject(has_inject, has_cache)</code>；<code>main.lua:_has_reinject_cache</code> 在<b>章节缓存 map.json 已存在但当前书仍干净</b>（首次注入失败场景）时仍展示「重新注入」入口，把「当前文件能否安全重建」交给同步层决定；保留「干净原书无缓存则隐藏」的防误删守卫。新增对应单元测试。</div>
+          <div class="k">④ 统一注入基线</div>
+          <div class="v">干净书 + 指定不同 <code>clean_source</code> 时：<b>clean_source 固化为 .orig（与注入源一致）</b>，当前打开的干净原书暂存为 .old 保留（不销毁、不混入 .orig），避免版本不一致与误销毁；cancel / 固化失败回滚逻辑补齐。同步更新该项既有语义用例以匹配「统一注入基线」。</div>
+          <div class="k">⑤ EOF 与读错区分 + .prev 回滚</div>
+          <div class="v"><code>U.copy_file_stream</code> 读循环遇 <code>rerr</code> 返回「读取源文件失败」（半截副本不当成功备份）；<code>.prev</code> 回滚结果<b>检查</b>，回滚失败如实报错（不谎称成功）。</div>
+          <div class="k">⑥ 缓存签名路径哈希</div>
+          <div class="v"><code>map_signature</code> 的 clean_source 部分改用 <code>U.path_hash</code>（FNV-1a 定长十六进制，无分隔符），避免完整路径的分隔符直接落入缓存目录名生成异常嵌套目录。</div>
+          <div class="k">rebase 最新 main</div>
+          <div class="v">将本 PR 从旧 base (38c352c) rebase 到 <code>upstream/main</code> (a8c2e1f, v0.3.2)，解决 sync.lua / main.lua / tests/run.lua 冲突（保留主线 test_sync_state / test_sync_gate / test_thought_popup / test_updater 测试），全量测试随行 24 个主线新增用例。</div>
+          <div class="k">测试补强（新增 2 用例，共 19）</div>
+          <div class="v">
+            <ul>
+              <li>固化 .orig 时用户取消（默认复制路径）→ 中止且不替换原书（验证取消向上传递）；</li>
+              <li><code>Binding.offer_reinject</code> 离线重注入口可见性（注入版 / 干净无缓存 / 干净有缓存三态）。</li>
+              <li>（同步更新「当前书是干净原书」语义用例以匹配「统一注入基线」：干净源→.orig、原书→.old 保留。）</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / main.lua / binding.lua / util.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 194 passed / 0 failed</span>（rebase 最新 main 后含 24 个主线新增用例，共较 168 新增 26）。</li>
+              <li>Diff 复核：rebase 后 vs upstream/main 9 文件（+893/−24），无泄漏无关改动；PR diff 仅含源码与测试，不进 fork main 审计目录。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅扩展 clean_source 取消 / 恢复 / 入口 / 基线 / 复制健壮性 / 签名；未传 <code>clean_source</code> 时完全走既有路径，向后兼容、无破坏性。</div>
+        </div>
+      </div>
+    </div>
 
 </div>
 
@@ -266,7 +308,8 @@
       <tr><td><code>pickthought.koplugin/pickthought/sync.lua</code></td><td>修改</td><td>+184</td><td>clean_source 解析、校验、固化 .orig 逻辑；<code>4a91c12</code> 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标；<code>c6d20d8</code> 评审二轮：流式复制、try_recover 统一回滚、干净原书保留为 .orig、map_signature 纳入干净源；<code>3c5e4ce</code> 评审三轮：_has_reinject_cache 改标记判定、load_meta 损坏中止、copy_file_stream 原子替换+取消、map_signature 加内容指纹</td></tr>
       <tr><td><code>pickthought.koplugin/main.lua</code></td><td>修改</td><td>+40</td><td>新增 <code>reinject_with_clean</code>；重注菜单项改为触发它；<code>_start_sync_task</code> 透传 <code>opts.clean_source</code>；<code>_has_reinject_cache</code> 改为按注入标记判定入口（P1#3 三轮：不再强制 .orig 存在）</td></tr>
       <tr><td><code>pickthought.koplugin/pickthought/sync_task.lua</code></td><td>修改</td><td>+4</td><td>捕获 <code>task.clean_source</code> 上值并透传给 <code>Sync.run</code></td></tr>
-      <tr><td><code>pickthought.koplugin/pickthought/util.lua</code></td><td>修改</td><td>+82</td><td>新增 <code>U.copy_file_stream</code>（1MB 分块 + 进度心跳，防 OOM，P1#1；三轮升级：临时文件 + flush/close 校验 + 原子替换 + 取消/失败回滚）；新增 <code>U.content_fingerprint</code>（FNV-1a 头尾采样，P2 内容指纹）</td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/binding.lua</code></td><td>修改</td><td>+11</td><td>新增纯判定 <code>Binding.offer_reinject(has_inject, has_cache)</code>，抽出重注入口可见性决策（作者意见 #3），便于单元测试且不依赖 ui.* 栈</td></tr>
+      <tr><td><code>pickthought.koplugin/pickthought/util.lua</code></td><td>修改</td><td>+110</td><td>新增 <code>U.copy_file_stream</code>（1MB 分块 + 进度心跳，防 OOM，P1#1；三轮升级：临时文件 + flush/close 校验 + 原子替换 + 取消/失败回滚 + EOF/读错区分 + .prev 回滚检查）；新增 <code>U.content_fingerprint</code>（FNV-1a 头尾采样，P2 内容指纹）；新增 <code>U.path_hash</code>（FNV-1a 定长十六进制，无分隔符，作者意见 #6 签名哈希）</td></tr>
       <tr><td><code>tests/run.lua</code></td><td>修改</td><td>+1</td><td>将新测试接入 files 列表</td></tr>
     <tr><td><code>tests/test_sync.lua</code></td><td>修改</td><td>+4</td><td>spine 缓存测试用例的 map_signature 期望值随新签名格式（大小@算法版本@指纹）更新</td></tr>
       <tr><td><code>tests/test_sync_clean_source.lua</code></td><td>新增</td><td>+463</td><td>17 个用例：干净源全量重建 / 缺失 / 已注入 / 固化失败回滚 / 等同 doc_path / 等同 backup / 脏 doc_path 先让位 swap 回归 / 固化失败+回滚失败 / swap失败+回滚失败 / 当前书未注入但含章节缓存 / 流式复制分块进度失败 / .old 遗留清理 / <b>损坏中止(零 rename)</b> / <b>复制替换失败保旧备份</b> / <b>复制取消</b> / <b>内容指纹差异化</b> / <b>指纹缺失返回 nil</b></td></tr>
