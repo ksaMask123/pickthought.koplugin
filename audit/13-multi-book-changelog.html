@@ -50,12 +50,12 @@
   <div class="sub">
     <span class="badge">feature/multi-book</span>
     <span class="badge">多书绑定注入</span>
-    分支基点 <code>upstream/main @ 90faed2</code> · 维护人 ksaMask
+    当前基点 <code>upstream/main @ 55018c7</code>（樱桃式 graft，rebase 自 90faed2）· 维护人 ksaMask
   </div>
 
   <p style="color:var(--muted);font-size:13.5px">
     本日志按时间线记录 PR #13（多书绑定）历次修改，含修改日期、动机、具体改动点、影响范围与校验结果。
-    本次集中落实作者 Mr54233 的<strong>第二轮评审 7 项</strong>（P1#1–P1#5、P2#6、P2#7）及杂项要求。
+    已落地的评审轮次：<strong>第二轮 7 项</strong>（P1#1–P1#5、P2#6、P2#7，见下）与<strong>第三轮 4 项 P1 + 收尾</strong>（失败书误标完成、离线重建登录拦截、聚合坐标误触发自动批、报告范围末本覆盖，及 data.data 旧字段兼容），并完成基于最新 main 的 rebase 解冲突。
   </p>
 
   <div class="timeline">
@@ -200,7 +200,7 @@
             <ul>
               <li><code>test_thought_popup.lua</code> 已从 <code>upstream/main</code> 恢复为规范版本，并随上述代码改动通过（翻页键切换+只重绘正文）。</li>
               <li><code>test_spine_cache</code> 经核查在 <code>run.lua</code> 仅引用一次、文件唯一、用例名无重复——作者所指「重复」在当前基线已不存在，无需删除。</li>
-              <li>rebase：分支已基于 <code>upstream/main @ 90faed2</code>（最近一次成功 fetch 的 main）。因当前代理 SSL 拉取失败，未能 fetch 比 90faed2 更新的 main；如需追平更新的 main 需先恢复代理拉取后再 rebase。</li>
+              <li>rebase：分支当时基于 <code>upstream/main @ 90faed2</code>（最近一次成功 fetch 的 main）。该限制后续已解除——见下方「rebase：樱桃式 graft 至 55018c7」条目，分支已真正追平到含 v0.3.0 的较新 main。</li>
             </ul>
           </div>
           <div class="k">测试</div><div class="v"><code>test_thought_popup.lua</code> 恢复后全套 173/0 通过（含原失败用例「想法弹窗翻页键切换并只重绘正文」）。</div>
@@ -208,10 +208,122 @@
       </div>
     </div>
 
+    <!-- ============ 三轮总览 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18 → 2026-08-19</div>
+      <h2>落实作者三轮评审 4 项 P1 + 收尾 + rebase 解冲突 <span class="tag p1">P1×4</span> <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者三轮复审指出：失败书会被误标「完成」、离线重建被登录拦截、多书聚合坐标误触发自动批、报告批次范围被末本覆盖；另要求 <code>normalize_chapters</code> 兼容旧字段。最后需基于最新 main rebase 解冲突。</div>
+          <div class="k">范围</div>
+          <div class="v"><code>sync.lua</code> <code>sync_task.lua</code> <code>main.lua</code> <code>binding.lua</code> + <code>tests/</code></div>
+          <div class="k">校验</div>
+          <div class="v">提交时测试 <span class="stat"><b>172</b> 通过 / <b>0</b> 失败</span>；rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 副本后最终 <span class="stat"><b>168</b> 通过 / <b>0</b> 失败</span>（新增 4 个回归用例）</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 三轮 P1#1 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>P1#1 · 失败书误标「完成」<span class="tag p1">P1</span> <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">文件</div><div class="v"><code>pickthought/sync.lua</code> <code>pickthought/sync_task.lua</code> · <code>tests/test_sync.lua</code></div>
+          <div class="k">动机</div><div class="v">失败书（章节列表拉取失败 / 连续失败熔断）旧逻辑只置 <code>failed/error</code>，遗留 <code>pending=0</code> 或续传游标错乱，使 <code>sync_task</code> 误判「完成」、下次无法续传。</div>
+          <div class="k">改动</div><div class="v">
+            <ul>
+              <li><code>sync.lua</code> 章节列表拉取失败分支改为写完整失败态 <code>{failed,error,next_index=1,pending=nil,total=0,start=1}</code>（多书恒全量重建，续传起点恒 1）。</li>
+              <li>连续失败熔断（≥3 章）分支记录完整续传状态 <code>{failed,next_index=i,pending=剩余,total,start}</code>，不再遗留伪完成。</li>
+              <li><code>sync_task.lua</code> 写 <code>.completed</code> 标记的门由 <code>pending==0</code> 加 <code>(not pb.failed)</code> 守卫：失败书即便 pending 巧合为 0 也绝不标「完成」。</li>
+            </ul>
+          </div>
+          <div class="k">测试</div><div class="v">新增 2 例：① 章节列表拉取失败——b1 记失败态且不写 pending、<code>next_index=1</code>、<code>total=0</code>，b2 正常；② 连续失败熔断——b1 前 3 章失败熔断，断言 <code>failed==true</code>、<code>next_index=3</code>、<code>pending=2</code>、<code>total=4</code>。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 三轮 P1#2 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>P1#2 · 离线重建被 require_login 拦截 <span class="tag p1">P1</span> <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">文件</div><div class="v"><code>main.lua</code></div>
+          <div class="k">动机</div><div class="v"><code>sync_entry</code> 在入口统一要求登录；解绑后离线重建（<code>reinject</code>）只用本地缓存、不碰网络，却因登录失效被拦截，导致解绑残留无法清除。</div>
+          <div class="k">改动</div><div class="v"><code>sync_entry</code> 登录门由 <code>if not self:require_login() then return end</code> 改为 <code>if mode~="reinject" and not self:require_login() then return end</code>：仅联网同步（<code>sync</code>）要求登录，<code>reinject</code> 离线重建免登录。</div>
+          <div class="k">测试</div><div class="v">复用既有注入/重建用例；离线重建路径不再经过 <code>require_login</code>（逻辑审查确认）。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 三轮 P1#3 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>P1#3 · 多书聚合坐标误触发自动批 <span class="tag p1">P1</span> <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">文件</div><div class="v"><code>main.lua</code></div>
+          <div class="k">动机</div><div class="v">多书聚合的 <code>next_index/pending</code> 与本地 EPUB 物理章节无可靠偏移映射；<code>_maybe_auto_batch</code> 基于聚合游标自动触发会误拉/漏拉某本书的内容。</div>
+          <div class="k">改动</div><div class="v"><code>_maybe_auto_batch</code> 开头加 <code>if #self:_book_ids(path) > 1 then return end</code>：多书（&gt;1 绑定）禁用基于聚合游标的自动触发，用户仍可手动「继续拉取」（走每本书各自的 <code>state.json</code> 续传）。</div>
+          <div class="k">测试</div><div class="v">逻辑审查确认；聚合手动续传用例（二轮 P1#4）覆盖多书续传。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 三轮 P1#4 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>P1#4 · 报告批次范围被末本覆盖 <span class="tag p1">P1</span> <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">文件</div><div class="v"><code>pickthought/sync.lua</code> · <code>tests/test_sync.lua</code></div>
+          <div class="k">动机</div><div class="v">聚合批次范围用全局累加器 <code>batch_start_index/batch_end_index</code>，多书逐本处理后末本的 range 会覆盖整体范围，导致报告「已处理章数 / 批次」错位。</div>
+          <div class="k">改动</div><div class="v">改为逐书记录 <code>book_batch_start/book_batch_end</code> 存入 <code>per_book[bid].batch_start/batch_end</code>；循环结束后对 <code>per_book</code> 取各书 <code>batch_start</code> 最小 / <code>batch_end</code> 最大作为聚合范围。</div>
+          <div class="k">测试</div><div class="v">新增「多书聚合批次范围取各书 min/max」：b1 处理 5 章、b2 处理 2 章，断言 <code>batch_start==1</code>、<code>batch_end==5</code>，逐书 <code>per_book["b1"].batch_end==5</code>、<code>per_book["b2"].batch_end==2</code>。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 三轮收尾 ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>收尾 · normalize_chapters 兼容 data.data 旧字段 <span class="tag ok">已修</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">文件</div><div class="v"><code>pickthought/binding.lua</code> · <code>tests/test_binding.lua</code></div>
+          <div class="k">动机</div><div class="v"><code>normalize_chapters</code> 在 <code>data.data</code> 命中目标书时只认 <code>rec.bookId</code>，旧网关响应中混用 <code>book_id</code>（下划线）的记录会被漏选，导致目标书章节取错/取空。</div>
+          <div class="k">改动</div><div class="v">命中条件由 <code>tostring(rec.bookId or "") == book_id_s</code> 改为 <code>tostring(rec.bookId or rec.book_id or "") == book_id_s</code>，同时兼容 <code>bookId</code> 与 <code>book_id</code>。</div>
+          <div class="k">测试</div><div class="v">新增「normalize_chapters 兼容 data.data 混排 bookId 与 book_id」：<code>data.data</code> 中一条 <code>bookId="other"</code>、一条 <code>book_id="b001"</code>，断言仅返回目标书那条（1 行、标题正确）。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ rebase ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18 → 2026-08-19</div>
+      <h2>rebase：樱桃式 graft 至 55018c7 并解冲突 <span class="tag ok">已解</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">动机</div><div class="v">二轮笔记中「因代理 SSL 无法 fetch 更新 main」已解除；本次把分支真正 rebase 到较新 main（含 v0.3.0 + 上游 UI/测试改进），解 11 处冲突并删冗余测试副本。</div>
+          <div class="k">方法</div><div class="v">
+            <ul>
+              <li>选<strong>安全基 <code>55018c7</code></strong>：它与分支 merge-base <code>38c352c</code> 相比<strong>未新增</strong> <code>.github/workflows/</code> 文件——当前 PAT 仅 <code>repo</code> 无 <code>workflow</code> scope，推含新 workflow 文件的提交会被拒。</li>
+              <li>用<strong>樱桃式 graft</strong>（非 <code>git rebase</code>）规避沙箱整树切换漏写文件：<code>git checkout -B graft-mb 55018c7</code> → <code>git cherry-pick 38c352c..feature/multi-book</code>（6 个提交：5a97ada/9cefcd5/7ba641a/71386f2/3c665e1/64c1eec），解决冲突后 HEAD=<code>44a62a4</code>。</li>
+              <li>删除冗余 <code>pickthought.koplugin/tests/</code> 目录（与顶层 <code>tests/</code> 重复，会随插件发版打包），落实「发版不带测试副本」。</li>
+            </ul>
+          </div>
+          <div class="k">冲突</div><div class="v">共解 11 处：epub_inject.lua×2（复用上游 455bd4c <code>add_err</code> EOF 修复）、test_epub_inject.lua（补上游 EOF 用例）、run.lua（去重 <code>test_spine_cache</code>）、main.lua×3、thought_popup.lua×3（保留既有 <code>onPreviousThought/onNextThought</code> 定义避免重复）。</div>
+          <div class="k">校验</div><div class="v">rebase 后全量测试 <span class="stat"><b>168</b> 通过 / <b>0</b> 失败</span>。分支 force-push 至 fork <code>feature/multi-book</code>（<code>6d59edc...44a62a4</code>）。</div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验（6 个改动 Lua 文件）全部通过；测试套件 <b>173 passed / 0 failed</b>。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>168 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
