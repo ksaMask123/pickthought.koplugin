@@ -35,9 +35,9 @@
     <div>日期</div><div>2026-08-14</div>
     <div>PR</div><div><a href="https://github.com/Mr54233/pickthought.koplugin/pull/15">#15 DB 完整性校验与 WAL 折叠</a></div>
     <div>上游 base</div><div><code>upstream/main</code> <code>38c352c</code></div>
-    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>9424a08</code></div>
-    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 复审三轮意见已落实（9424a08），待作者 flip</div>
-    <div>单测</div><div><span class="ok">DB 完整性用例 14/0</span>（分支基线较旧，全量套件待合入 upstream 后统一跑）</div>
+    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>d4aa811</code></div>
+    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 最新一轮意见已落实（d4aa811），待作者 flip</div>
+    <div>单测</div><div><span class="ok">全量 195 passed / 0 failed</span>（含 DB 完整性 20/0；本地 LuaJIT 校验绿）</div>
     <div>设备部署</div><div><span class="warn">未部署</span>（待授权；本 PR 仅改 <code>thought_db.lua</code>，属 SQLite 层，部署风险低）</div>
   </div>
 
@@ -152,7 +152,22 @@
     <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 标记路径与测试；未引入破坏性变更，向后兼容。
   </div>
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 4 个源/测试文件。</p>
+  <h2>九、2026-08-17 最新一轮评审（提交 d4aa811，竞态/存在性/直测补强）</h2>
+  <div class="box">
+    <b>动机</b>：作者在 2026-08-17 对 PR #15 的最新一轮意见，聚焦 ① 备份目标名"探测后 rename"仍残留竞态窗口、② 隔离流程需显式区分"文件不存在"与"权限/IO 不可检查"、③ 测试须直测 <code>integrity_check</code> 的 prepare/step 异常路径（而非整体替换函数）、④ 测试不得依赖 <code>lfs</code>。本提交逐条落实并修复一处测试桩隐患。<br>
+    <b>具体改动（仅 thought_db.lua + 测试）</b>：
+    <ul>
+      <li><code>reserve_corrupt_main(base)</code> 替换旧 <code>unique_corrupt_target</code>：由"探测占用后 rename"改为"先 <code>io.open</code> 探测候选目标空闲、空闲才 <code>os.rename</code> 占用"，占用即成功才返回；任一步失败（目标被占/权限/IO）持续换名重试，<b>消除"探测后 rename"的 TOCTOU 竞态</b>；序号到 9999 上限后换时间戳再次确认目标为空，杜绝覆盖旧备份（Kindle 同秒重复隔离丢证据）。</li>
+      <li>新增 <code>path_exists_distinct(path)</code>：用 <code>lfs.attributes</code> 错误码区分"文件不存在"与"权限/IO 不可检查"（返回 <code>(exists, state)</code>，state 为 <code>"uncheckable"</code> 时调用方保守处理）；lfs 缺失时退化 <code>io.open</code> 探测。重写 <code>isolate_corrupt</code>：主库 <code>uncheckable</code> → 保守报错中止；sidecar 存在或不可检查才尝试归档，失败返回错误（作者意见：不把"不可检查"误判为"不存在"而静默遗漏未归档文件）。</li>
+      <li>测试新增两条 <code>integrity_check</code> 直测路径：<code>prepare</code> 返回 <code>nil</code> 直接 <code>error</code>（命中 <code>if not stmt then error(...)</code>）；<code>stmt:step</code> 抛错被透传为过程失败（作者意见）。</li>
+      <li>测试去 <code>lfs</code> 依赖：临时目录改为跨平台 <code>SEP</code>/<code>sh</code>/<code>mkdir_p</code>/<code>rm_rf</code>（Linux 用 mkdir/rm，Windows 回退 cmd），<code>tmp_dir</code>/<code>rm_tmp</code> 同步；新增"sidecar 不可检查(权限/IO)时保守报错"用例。</li>
+    </ul>
+    <b>测试桩修复（关键）</b>：旧 <code>tests/stubs.lua</code> 的 <code>libs/libkoreader-lfs.attributes</code> 恒返回 <code>nil</code>（无错误串），使 <code>path_exists_distinct</code> 把<b>所有路径</b>误判为 <code>"uncheckable"</code>，导致 <code>isolate_corrupt</code> 在"主库状态无法确认"守卫处静默中止、真实文件移动测试全红。新桩忠实返回存在性（存在→属性表 / 不存在→<code>nil,"No such file or directory"</code>），目录与 <code>==\"directory\"</code> 行为不变。<br>
+    <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">195 passed / 0 failed</span>（含 DB 完整性 20/0，5 个真实文件隔离用例由红转绿）。<br>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 目标预留 / 存在性判定与测试；未引入破坏性变更，向后兼容。
+  </div>
+
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>d4aa811</code>。</p>
 </div>
 </body>
 </html>
