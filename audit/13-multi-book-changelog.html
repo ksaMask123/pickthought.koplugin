@@ -320,6 +320,28 @@
       </div>
     </div>
 
+        <!-- ============ rebase-a8c2e1f ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>rebase：merge graft 至 a8c2e1f（绝对最新 main）并解冲突 <span class="tag ok">已解</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">动机</div><div class="v">用户提供了含 <code>workflow</code> scope 的 PAT，目标把 PR #13 追平上游绝对最新 <code>main</code>（<code>a8c2e1f</code>，含 <code>337329e</code> 重写 <code>Sync.run</code> 单书循环 + 新 <code>.github/workflows/</code>），消除 <code>dirty</code> 合并冲突，让原作者可直接点合并。</div>
+          <div class="k">方法</div><div class="v">
+            <ul>
+              <li>采用<strong>方案 A：多书优先 + 吸收 337329e 可靠性外围</strong>。多书 <code>fetch_book</code> / <code>per_book</code> 续传为基线；吸收 <code>337329e</code> 的内存模式 / keep-awake 守卫、前台门禁、内存冷却退避、前台内存重试（<code>allow_memory_retry</code> 闸门）。</li>
+              <li>用一次性 <code>git merge graft-mb --no-commit --no-ff</code> 把 PR #13 全部改动 apply 到 <code>a8c2e1f</code>，冲突一次性集中标出（4 文件），比逐个 cherry-pick 6 轮更可控。</li>
+              <li>冲突文件：<code>sync.lua</code>（取多书版，含 <code>next_index=1</code> 失败分支防御）、<code>sync_task.lua</code>（多书版 + 补回内存冷却检查）、<code>main.lua</code>（多书优先融合 337329e 前台门禁 / 内存重试）、<code>tests/run.lua</code>（两测试并集保留）。</li>
+            </ul>
+          </div>
+          <div class="k">冲突</div><div class="v">4 文件冲突块一次性解出；<code>main.lua</code> 的 <code>book_actions</code> 区 git 自动合并产生结构错乱（误把 <code>if agg.pending&gt;0</code> 块提前 <code>end</code>，把 <code>callback</code> 甩到清理数据行后），读 180–250 行定位并修正，LuaJIT 复校 ALL_OK。</div>
+          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>168</b> 通过 / <b>0</b> 失败</span>。提交 <code>562687a</code> 并 force-push 至 fork <code>feature/multi-book</code>（<code>44a62a4...562687a</code>）。GitHub 侧核验 <code>mergeable=true</code>、<code>mergeable_state=blocked</code>（无冲突，仅分支保护 / 必需检查待作者 review），<code>merge-base --is-ancestor a8c2e1f HEAD</code> = YES。</div>
+          <div class="k">备注</div><div class="v">本次 rebase 使用的 <code>workflow</code> scope PAT 未落盘，仅用于本次推送。PR 描述已同步更新 rebase 说明（已追平 a8c2e1f）。</div>
+        </div>
+      </div>
+    </div>
+
+
   </div>
 
   <div class="foot">
