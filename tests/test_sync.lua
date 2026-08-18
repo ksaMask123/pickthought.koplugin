@@ -1,7 +1,38 @@
 local Sync = require("pickthought.sync")
+local U = require("pickthought.util")
 
 local CH1_TEXT = "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
 local CH2_TEXT = "<html><body><p>滟滟随波千万里,何处春江无月明。</p></body></html>"
+
+-- 测试环境 lfs 是 no-op 桩,无法真正建目录/写文件,导致 U.atomic_write 静默失败,
+-- 使 map.json 与 spine 缓存无法持久化(第二批被迫冷模式重读)。用内存 FS 替身
+-- 临时替换 U 的磁盘函数,验证完立即还原,不影响其他用例。
+local function with_memfs(fn)
+    local saved = {}
+    for _, k in ipairs({"mkdir", "read_file", "file_exists", "atomic_write", "remove_tree", "list"}) do
+        saved[k] = U[k]
+    end
+    local fs = {}
+    U.mkdir = function(p) fs[tostring(p)] = fs[tostring(p)] or true; return true end
+    U.file_exists = function(p) return fs[tostring(p)] ~= nil end
+    U.read_file = function(p) local c = fs[tostring(p)]; return c == true and nil or c end
+    U.atomic_write = function(p, d) fs[tostring(p)] = d; return true end
+    U.remove_tree = function(p)
+        local pk = tostring(p)
+        for k in pairs(fs) do
+            if k == pk or k:sub(1, #pk + 1) == pk .. "/" then fs[k] = nil end
+        end
+        return true
+    end
+    U.list = function(p)
+        local o = {}; local pre = tostring(p) .. "/"
+        for k in pairs(fs) do if k:sub(1, #pre) == pre then o[#o + 1] = k end end
+        return o
+    end
+    local ok, err = xpcall(fn, debug.traceback, fs)
+    for k, v in pairs(saved) do U[k] = v end
+    if not ok then error(err, 0) end
+end
 
 local function make_deps(overrides)
     local calls = {saved = {}, injected = nil, progress = {}, renames = {}, removed = {}}
@@ -435,7 +466,7 @@ T.case("分批预算:拉满即收工,缓存命中免费", function()
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local network_calls = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 local n = tonumber(uid)
@@ -482,7 +513,7 @@ T.case("章节批次预算限制缓存回放,不再一次性注入全书", funct
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_calls = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function()
                 fetch_calls = fetch_calls + 1
@@ -509,7 +540,7 @@ T.case("已完成缓存续同步跳过旧章,只注入新章", function()
     local rows = {}
     for i = 1, 5 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 if tonumber(uid) < 5 then
@@ -586,7 +617,7 @@ T.case("首个硬失败立即停在失败章节", function()
     for i = 1, 10 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_count = 0
     local deps, calls = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function() fetch_count = fetch_count + 1; error("network request failed") end,
         },
@@ -603,7 +634,7 @@ T.case("缓存命中后失败仍停在失败章节", function()
     for i = 1, 7 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local fetch_calls = 0
     local deps = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 fetch_calls = fetch_calls + 1
@@ -628,7 +659,7 @@ T.case("末尾连续失败且成功章节无划线时报拉取失败而非无划
     local rows = {}
     for i = 1, 4 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
     local deps = make_deps({
-        api = {chapters = function() return {data = rows} end},
+        api = {chapters = function() return {chapters = rows} end},
         annotations = {
             fetch_chapter = function(_, _, uid)
                 if tostring(uid) == "1" then
@@ -697,4 +728,380 @@ T.case("同步不依据网络耗时降级(fix #2 回归)", function()
     T.ok(report, "同步应成功: " .. tostring(err))
     T.eq(record_calls, 0, "sync 不应采样整章 fetch 耗时")
     T.eq(rest_calls, 0, "sync 不应因网络慢触发让出")
+end)
+
+
+T.case("多书绑定:一次同步聚合多本微信读书书并合并注入", function()
+    -- 模拟「一本本地合集 EPUB 绑了 b001、b002 两本微信读书书」。
+    -- 两本各自有第一章(划线一致,都能映射到本地 c1);验证:两本都被拉取、
+    -- 注入的 mapped 合并了两本的章节(各自带 book_id)、inject 收到完整 book_ids。
+    local api_calls = {}
+    local fetch_calls = {}
+    local deps, calls = make_deps({
+        book_ids = {"b001", "b002"},
+        api = {
+            chapters = function(_, bid)
+                api_calls[#api_calls + 1] = tostring(bid)
+                local suffix = tostring(bid)
+                return {chapters = {
+                    {chapterUid = 1, title = "第一章(" .. suffix .. ")", chapterIdx = 1},
+                    {chapterUid = 2, title = "第二章(" .. suffix .. ")", chapterIdx = 2},
+                }}
+            end,
+        },
+        annotations = {
+            fetch_chapter = function(_, bid, uid)
+                fetch_calls[#fetch_calls + 1] = {book_id = tostring(bid), uid = tostring(uid)}
+                if tostring(uid) == "1" then
+                    return {
+                        underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                        review_map = {["0-7"] = {{content = "好句", author = "甲"}}},
+                        review_groups = {{range = "0-7", texts = {{content = "好句", author = "甲"}}}},
+                        underline_count = 1, thought_count = 1, thought_entry_count = 1, errors = {},
+                    }
+                end
+                return {underlines = {}, review_map = {}, review_groups = {},
+                    underline_count = 0, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "多书聚合应成功: " .. tostring(err))
+
+    -- 两本书的章节列表都被请求过(逐本拉取聚合)。
+    T.eq(#api_calls, 2, "按 book_ids 逐本拉取章节列表")
+    T.ok(api_calls[1] == "b001" and api_calls[2] == "b002", "先拉 b001 再拉 b002")
+
+    -- 章节总数为两本之和;有划线的章节为两本各自的第一章。
+    T.eq(report.chapters_total, 4, "章节总数=两本之和")
+    T.eq(report.chapters_with_data, 2, "两本各有 1 章有划线")
+
+    -- 注入的 mapped 合并了两本书的章节,且每行都带正确的 book_id。
+    local books_in_mapped = {}
+    for _, row in ipairs(calls.injected.mapped) do
+        books_in_mapped[row.book_id] = true
+    end
+    T.eq(#calls.injected.mapped, 2, "合并注入两本各有 1 章")
+    T.ok(books_in_mapped["b001"] and books_in_mapped["b002"], "两本都在注入结果里")
+
+    -- inject 调用收到完整 book_ids(解决「换绑漏书」的根因:一次性合并重建)。
+    T.eq(type(calls.injected.options.book_ids), "table", "inject 选项携带 book_ids")
+    T.eq(calls.injected.options.book_ids[1], "b001", "book_ids 含 b001")
+    T.eq(calls.injected.options.book_ids[2], "b002", "book_ids 含 b002")
+
+    -- 多书强制干净重建(不走增量 append),从原书/备份读取而非当前注入版。
+    T.eq(calls.injected.options.append, false, "多书强制全量重建,不增量追加")
+end)
+
+T.case("多书同步入口:从 Binding.list 取 book_ids + 函数式 map 缓存(P1#1/P1#2)", function()
+    -- 复刻 main.lua 的接线:_book_ids 从 Binding.list 取全部绑定书 id,map_cache_path
+    -- 用函数式(每书独立 map.json),与后台 sync_task 完全一致(P1#2 统一约定)。
+    local Binding = require("pickthought.binding")
+    local kv = {}
+    local store = {
+        get = function(_, k, d) return kv[k] ~= nil and kv[k] or d end,
+        set = function(_, k, v) kv[k] = v end,
+    }
+    local path = "/books/合集.epub"
+    Binding.save(store, path, {book_id = "b1", title = "甲"})
+    Binding.save(store, path, {book_id = "b2", title = "乙"})
+    local function book_ids_of(p)
+        local list = Binding.list(store, p)
+        local ids = {}
+        for _, rec in ipairs(list) do
+            if rec and rec.book_id then ids[#ids + 1] = rec.book_id end
+        end
+        if #ids == 0 then
+            local b = Binding.get(store, p)
+            if b and b.book_id then ids[#ids + 1] = b.book_id end
+        end
+        return ids
+    end
+    local book_ids = book_ids_of(path)
+    T.eq(#book_ids, 2, "入口取到两本书 id")
+
+    local deps, calls = make_deps({
+        book_ids = book_ids,
+        api = { chapters = function(_, bid)
+            return {data = {
+                {chapterUid = 1, title = tostring(bid) .. "-1", chapterIdx = 1},
+                {chapterUid = 2, title = tostring(bid) .. "-2", chapterIdx = 2},
+            }}
+        end},
+    })
+    deps.map_cache_path = function(bid) return "/cache/" .. bid .. "/sync-cache/map.json" end
+    local report, err = Sync.run(deps)
+    T.ok(report, "入口多书聚合应成功: " .. tostring(err))
+    T.eq(report.chapters_total, 4, "两本各 2 章=4")
+    T.ok(report.per_book["b1"] and report.per_book["b2"], "per_book 两本都在")
+    T.eq(#calls.injected.mapped, 2, "两本各有 1 章有划线,合并注入 2 章")
+end)
+
+T.case("多书同步按书记录续传游标 per_book(P1#5)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                return {data = {
+                    {chapterUid=1,title="b1-1",chapterIdx=1},
+                    {chapterUid=2,title="b1-2",chapterIdx=2},
+                    {chapterUid=3,title="b1-3",chapterIdx=3},
+                }}
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+                {chapterUid=3,title="b2-3",chapterIdx=3},
+                {chapterUid=4,title="b2-4",chapterIdx=4},
+                {chapterUid=5,title="b2-5",chapterIdx=5},
+            }}
+        end},
+        -- 两本书的每个章节都带可匹配的划线(引文落在本地 c1 文本里),确保全部章节
+        -- 都能匹配→每本 pending=0、next_index=末章+1。
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "多书同步应成功")
+    T.eq(report.chapters_total, 8, "章节总数=3+5")
+    T.ok(report.per_book and report.per_book["b1"] and report.per_book["b2"],
+        "per_book 含两本书,不混为单一聚合")
+    T.eq(report.per_book["b1"].total, 3, "b1 总数")
+    T.eq(report.per_book["b1"].next_index, 4, "b1 续传位置(全部完成→末章+1)")
+    T.eq(report.per_book["b1"].pending, 0, "b1 无待处理")
+    T.eq(report.per_book["b2"].total, 5, "b2 总数")
+    T.eq(report.per_book["b2"].next_index, 6, "b2 续传位置(全部完成→末章+1)")
+    T.eq(report.per_book["b2"].pending, 0, "b2 无待处理")
+    T.eq(report.chapters_pending, 0, "聚合待处理=两本之和(0)")
+end)
+
+T.case("两批同步:第二批命中 spine 缓存不再重读正文(P1#2)", function()
+    local MARKER = require("pickthought.epub_inject").MARKER
+    local doc_path = "/books/两批.epub"
+    local spine = {{href = "OEBPS/c1.xhtml"}, {href = "OEBPS/c2.xhtml"}}
+    local TEXT = {
+        ["OEBPS/c1.xhtml"] = "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>",
+        ["OEBPS/c2.xhtml"] = "<html><body><p>滟滟随波千万里,何处春江无月明。</p></body></html>",
+    }
+
+    -- 用内存 FS 替身包裹两批,使 map.json / spine 缓存在批间真正持久化
+    -- (测试环境 lfs 是 no-op,裸跑会让 atomic_write 静默失败、第二批走冷模式重读)。
+    with_memfs(function()
+        local map_path = "tests/.tmp_twobatch/map.json"
+        local read_counts = {}
+        local flags = { batch2 = false }
+        local deps = {
+            doc_path = doc_path,
+            book_id = "b1",
+            file_exists = function(p) return flags.batch2 and tostring(p):find("%.orig") end,
+            rename = function() return true end,
+            remove = function() return true end,
+            api = { chapters = function()
+                return {data = {
+                    {chapterUid=1,title="1",chapterIdx=1},
+                    {chapterUid=2,title="2",chapterIdx=2},
+                    {chapterUid=3,title="3",chapterIdx=3},
+                    {chapterUid=4,title="4",chapterIdx=4},
+                }}
+            end},
+            annotations = { fetch_chapter = function(_, _, uid)
+                local t = {["1"]="春江潮水连海平",["2"]="滟滟随波千万里",
+                           ["3"]="春江潮水连海平",["4"]="滟滟随波千万里"}
+                local txt = t[tostring(uid)]
+                if txt then
+                    return {underlines={{range="0-7",markText=txt}}, review_map={}, review_groups={},
+                        underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+                end
+                return {underlines={}, review_map={}, review_groups={}, underline_count=0, thought_count=0, thought_entry_count=0, errors={}}
+            end},
+            load_meta = function(p)
+                if flags.batch2 and tostring(p):find("%.orig") then
+                    return {spine = spine, has = {}}
+                end
+                if flags.batch2 and tostring(p) == doc_path then
+                    return {spine = spine, has = {[MARKER] = true}}
+                end
+                return {spine = spine, has = {}}
+            end,
+            read_text = function(_, href)
+                read_counts[href] = (read_counts[href] or 0) + 1
+                return TEXT[href]
+            end,
+            save_thoughts = function() return 0 end,
+            inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+            progress = function() return true end,
+            -- P1#2:前台也改用函数式 map_cache_path,与后台一致(每书独立 map.json)。
+            map_cache_path = function() return map_path end,
+            spine_cache = true,
+        }
+        -- 第一批:全量拉取,冷模式捕获 spine 缓存,真实 read_text 被调用。
+        local r1 = Sync.run(deps)
+        T.ok(r1, "第一批应成功")
+        local calls1 = 0
+        for _, c in pairs(read_counts) do calls1 = calls1 + c end
+        T.ok(calls1 > 0, "第一批读取了正文(冷捕获)")
+
+        -- 第二批:从 ch3 续传(增量 append;ch3/ch4 引文落在 c1/c2,均已在第一批缓存)。
+        flags.batch2 = true
+        deps.append = true
+        deps.chapter_start = 3
+        local r2 = Sync.run(deps)
+        T.ok(r2, "第二批应成功")
+        T.eq(r2.per_book["b1"].next_index, 5, "第二批续传完成位置")
+        T.eq(r2.per_book["b1"].pending, 0, "第二批该书全部完成")
+
+        -- 第二批整批映射只命中 spine 缓存,不得再调用真实 read_text。
+        local calls2 = 0
+        for _, c in pairs(read_counts) do calls2 = calls2 + c end
+        T.eq(calls2, calls1, "第二批未重新读取已缓存的正文文件")
+    end)
+end)
+
+-- 评审三轮 P1#1:多书场景下,某本书「章节列表拉取失败」必须记失败态、不写 pending,
+-- 且绝不能让 sync_task 误以为该书已「完成」(否则下次无法经断点缓存续传)。
+T.case("多书章节列表拉取失败:记失败态且不写 pending(P1#1)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},   -- 两本: b1 拉章节列表直接抛错,b2 正常
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                error("获取章节列表失败:网络超时")   -- 抛错 → pcall 捕获 → 软失败
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "b2 成功取到数据,整体不应硬失败")
+    T.ok(report.per_book and report.per_book["b1"] and report.per_book["b2"], "per_book 两本都在")
+    T.ok(report.per_book["b1"].failed == true, "b1 标记 failed")
+    T.ok(report.per_book["b1"].pending == nil, "b1 不写 pending(避免 sync_task 误判完成)")
+    T.eq(report.per_book["b1"].next_index, 1, "b1 续传起点重置为 1")
+    T.eq(report.per_book["b1"].total, 0, "b1 总量未知(列表未取到)")
+    T.eq(report.per_book["b2"].pending, 0, "b2 正常完成")
+    T.ok(not report.per_book["b2"].failed, "b2 非失败书")
+end)
+
+-- 评审三轮 P1#1:多书某本书连续章拉取失败触发熔断,必须记录「下次从失败章续传」的
+-- 完整状态(next_index=失败章、pending=剩余章、total),且不误标完成。
+T.case("多书连续失败熔断:记录续传游标且不误标完成(P1#1)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                return {data = {   -- 4 章:前 3 章划线拉取抛错 → 连续 3 章熔断
+                    {chapterUid=1,title="b1-1",chapterIdx=1},
+                    {chapterUid=2,title="b1-2",chapterIdx=2},
+                    {chapterUid=3,title="b1-3",chapterIdx=3},
+                    {chapterUid=4,title="b1-4",chapterIdx=4},
+                }}
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, bid, uid)
+            if bid == "b1" and tonumber(uid) <= 3 then
+                error("断网:章 " .. tostring(uid) .. " 划线拉取失败")  -- 前 3 章硬失败
+            end
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "b2 成功取到数据,整体不应硬失败")
+    T.ok(report.per_book and report.per_book["b1"] and report.per_book["b2"], "per_book 两本都在")
+    T.ok(report.per_book["b1"].failed == true, "b1 标记 failed(熔断)")
+    T.eq(report.per_book["b1"].next_index, 3, "b1 从失败章(第3章)续传")
+    T.eq(report.per_book["b1"].pending, 2, "b1 剩余 2 章(第3、4章)待处理")
+    T.eq(report.per_book["b1"].total, 4, "b1 总量 4")
+    T.eq(report.per_book["b2"].pending, 0, "b2 正常完成")
+    T.ok(not report.per_book["b2"].failed, "b2 非失败书")
+end)
+
+-- 评审三轮 P1#4:多书聚合批次范围(batch_start/end)须取各书 min/max,不能让末本覆盖
+-- 整体范围。b1 处理 5 章、b2 处理 2 章 → 聚合 batch_end 应为 5(旧实现会被末本覆盖成 2)。
+T.case("多书聚合批次范围取各书 min/max(P1#4)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                return {data = {
+                    {chapterUid=1,title="b1-1",chapterIdx=1},
+                    {chapterUid=2,title="b1-2",chapterIdx=2},
+                    {chapterUid=3,title="b1-3",chapterIdx=3},
+                    {chapterUid=4,title="b1-4",chapterIdx=4},
+                    {chapterUid=5,title="b1-5",chapterIdx=5},
+                }}
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "多书聚合应成功")
+    T.eq(report.batch_start, 1, "聚合 batch_start 取各书最小=1")
+    T.eq(report.batch_end, 5, "聚合 batch_end 取各书最大=5(非末本 2)")
+    T.eq(report.per_book["b1"].batch_start, 1, "b1 逐书 batch_start")
+    T.eq(report.per_book["b1"].batch_end, 5, "b1 逐书 batch_end")
+    T.eq(report.per_book["b2"].batch_start, 1, "b2 逐书 batch_start")
+    T.eq(report.per_book["b2"].batch_end, 2, "b2 逐书 batch_end")
 end)

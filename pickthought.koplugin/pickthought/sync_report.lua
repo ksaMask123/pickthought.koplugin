@@ -83,6 +83,35 @@ function M.build(report, options)
         lines[#lines + 1] = "全部章节已处理完成"
     end
 
+    -- 逐书明细(P1#4):多书绑定时,聚合状态之外再列出每本书的进度与失败,
+    -- 避免只显示第一本而漏掉其他书的待同步内容。单书不重复展示。
+    local per_book = report.per_book
+    if type(per_book) == "table" then
+        local bids = {}
+        for bid in pairs(per_book) do bids[#bids + 1] = bid end
+        table.sort(bids)
+        if #bids > 1 then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = "逐书明细"
+            for _, bid in ipairs(bids) do
+                local pb = per_book[bid] or {}
+                local label = (options.titles and options.titles[tostring(bid)]) or tostring(bid)
+                local p = number(pb.pending)
+                local t = number(pb.total)
+                local nx = number(pb.next_index)
+                if pb.failed then
+                    lines[#lines + 1] = string.format("· %s：同步失败（%s）", label,
+                        tostring(pb.error or "未知错误"))
+                elseif p > 0 then
+                    lines[#lines + 1] = string.format("· %s：已处理 %s/%s 章，还剩 %s 章（续传第 %s 章）",
+                        label, integer(t - p), integer(t), integer(p), integer(nx))
+                else
+                    lines[#lines + 1] = string.format("· %s：%s/%s 章已完成", label, integer(t), integer(t))
+                end
+            end
+        end
+    end
+
     if #(report.unmatched or {}) > 0 then
         lines[#lines + 1] = string.format("有 %s 章未匹配本地正文", integer(#report.unmatched))
     end

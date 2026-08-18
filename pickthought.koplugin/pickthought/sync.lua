@@ -21,9 +21,25 @@ local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
 local SpineCache = require("pickthought.spine_cache")
 local U = require("pickthought.util")
+local SpineCache = require("pickthought.spine_cache")
 local logger = require("logger")
 
 local Sync = {}
+
+-- 绑定支持「一本本地书绑多本微信读书书」(合集/套装 EPUB)。book_ids 为列表;
+-- 未提供时回退到单个 deps.book_id(旧调用方/旧测试保持原样)。去重保序。
+local function book_ids_of(deps)
+    if type(deps.book_ids) == "table" and #deps.book_ids > 0 then
+        local seen, out = {}, {}
+        for _, b in ipairs(deps.book_ids) do
+            local s = tostring(b or "")
+            if s ~= "" and not seen[s] then seen[s] = true; out[#out + 1] = s end
+        end
+        if #out > 0 then return out end
+    end
+    if deps.book_id then return {tostring(deps.book_id)} end
+    return {}
+end
 
 Sync.BACKUP_SUFFIX = ".orig"
 
@@ -38,11 +54,25 @@ function Sync.run(deps)
     local rename = deps.rename or os.rename
     local remove = deps.remove or os.remove
 
+    -- 绑定支持「一本本地书绑多本微信读书书」。book_ids 为列表;未提供时
+    -- 回退到单个 deps.book_id,旧调用方/旧测试行为不变。
+    local book_ids = book_ids_of(deps)
+    if #book_ids == 0 then return nil, "未指定要同步的微信读书书" end
+    local multi_book = #book_ids > 1
+    -- 多书合并映射的缓存键命名空间(防跨书 uid 撞键);单书退化为纯 uid,缓存格式不变。
+    local function ck(bid, uid) return multi_book and (tostring(bid) .. "/" .. tostring(uid)) or tostring(uid) end
+    -- 映射缓存路径:可传函数(每书独立文件)或字符串(单书单文件,旧行为)。
+    local function cache_path_for(bid)
+        if type(deps.map_cache_path) == "function" then return deps.map_cache_path(bid) end
+        return deps.map_cache_path
+    end
+
     -- 已有注入版时,增量同步直接以当前书为源;首次/全量重建才从 .orig 读取。
+    -- 多书合并注入必须基于干净 .orig 整体重建,不能走增量 append(否则漏书)。
     local doc_path = tostring(deps.doc_path)
     local backup = Sync.backup_path(doc_path)
     local current_meta = deps.load_meta(doc_path)
-    local append = deps.append == true and current_meta and current_meta.has
+    local append = (not multi_book) and deps.append == true and current_meta and current_meta.has
         and current_meta.has[EpubInject.MARKER] == true
     local src = append and doc_path or (file_exists(backup) and backup or doc_path)
 
@@ -66,35 +96,35 @@ function Sync.run(deps)
         end
     end
 
-    if not step("chapters", 0, 1, "获取章节列表") then return nil, "已取消" end
-    local ok, chapters_raw = pcall(function() return deps.api:chapters(deps.book_id) end)
-    if not ok then return nil, "获取章节列表失败:" .. tostring(chapters_raw) end
-    local chapter_list = Binding.normalize_chapters(chapters_raw, deps.book_id)
-    if #chapter_list == 0 then return nil, "微信读书返回的章节列表为空" end
-
+    -- 每本书独立拉取,累积到同一 fetched 列表;每章携带 book_id 供后续
+    -- save_thoughts / 注入 / 想法合并正确定位到对应书。
     local fetched = {}
     local total_underlines = 0
     local total_thought_entries = 0
+    local chapters_total_all = 0
     -- fetch_budget 是网络预算; chapter_budget 是 CPU/注入预算,两者不能混用。
     local fetch_budget = tonumber(deps.fetch_budget)
     if fetch_budget and fetch_budget <= 0 then fetch_budget = nil end
-    local chapter_start = math.max(1, tonumber(deps.chapter_start) or 1)
-    if not append then chapter_start = 1 end
     local chapter_budget = tonumber(deps.chapter_budget)
     if chapter_budget and chapter_budget <= 0 then chapter_budget = nil end
     local skip_resumed = deps.skip_resumed == true
-    local fresh_fetches = 0
     local chapters_pending = 0
     local rate_limited = false
     local rate_limit_wait
-    local next_index = chapter_start
+    local next_index
     local batch_start_index, batch_end_index
+    -- 续传游标按书保存(P1#5):每本书一份 {next_index, pending, total, start},
+    -- 避免多书时全局 next_index 被末本覆盖、state.json 写入聚合值。
+    local per_book = {}
     local chapters_processed, chapters_fetch_succeeded = 0, 0
-    local selected_end = #chapter_list
-    -- 硬失败=整章划线都没拉到;部分失败=章节数据不完整。两者都不能跨过,
-    -- 否则后续章节虽然拉到了,连续游标却会把失败章节永久跳过。
+    -- 硬失败=整章划线都没拉到(决定是否中止);部分失败=划线在手、想法批次有缺(只计报告)。
     local hard_failures, partial_errors = 0, 0
     local thoughts_saved, save_failures = 0, 0
+    local thought_save_failed = {}
+    -- 多书按书隔离:预算消耗 / 连续失败 / 限速状态每本独立(book_fresh_fetches、
+    -- book_consecutive_hard / book_rate_limited 在 fetch_book 内局部化,结束处聚合进报告)。
+    -- 第一本耗尽预算或触发限速/熔断不得影响后续书(评审二轮 P1#2)。
+    local failed_books = {}
     -- 记住最后一次真实错误:失败消息必须告诉用户到底错在哪,不能只说「网络失败」。
     local last_error
     local function short_err(text)
@@ -102,106 +132,212 @@ function Sync.run(deps)
         if #text > 160 then text = text:sub(1, 160) .. "…" end
         return text
     end
-    if not skip_resumed and chapter_budget then
-        selected_end = math.min(#chapter_list, chapter_start + chapter_budget - 1)
-    end
-    local i = chapter_start
-    while i <= #chapter_list do
-        local ch = chapter_list[i]
-        if fetch_budget and fresh_fetches >= fetch_budget then
-            chapters_pending = #chapter_list - i + 1
-            break
+
+    -- 单本书的拉取(含续拉预算/熔断)。多书时每本都从头拉(各书独立续拉暂不支撑)。
+    local function fetch_book(bid)
+        -- 每本书独立的预算/限速/连续失败状态:第一本耗尽预算或触发限速/熔断,
+        -- 不得影响后续书(评审二轮 P1#2)。
+        local book_fresh_fetches = 0
+        local book_consecutive_hard = 0
+        local book_rate_limited = false
+        local book_rate_limit_wait
+        if not step("chapters", 0, 1, "获取章节列表") then return nil, "已取消" end
+        local ok, chapters_raw = pcall(function() return deps.api:chapters(bid) end)
+        if not ok then
+            local msg = "获取章节列表失败:" .. tostring(chapters_raw)
+            if multi_book then
+                -- 章节列表拉取失败:本书软失败。记录失败态与续传起点,不写 pending
+                -- (未知)以免 sync_task 误判「完成」(评审三轮 P1#1)。多书恒为全量重建
+                -- (append=false)→续传起点恒为 1,下次同步仍可从头经断点缓存续传。
+                per_book[bid] = {failed = true, error = msg,
+                    next_index = 1, pending = nil, total = 0, start = 1}
+                return false, msg -- 多书:本书软失败,继续下一本
+            end
+            return nil, msg
         end
-        if not skip_resumed and i > selected_end then
-            chapters_pending = #chapter_list - i + 1
-            break
+        local chapter_list = Binding.normalize_chapters(chapters_raw, bid)
+        chapters_total_all = chapters_total_all + #chapter_list
+        if #chapter_list == 0 then
+            if multi_book then
+                logger.warn("[撷思][Sync] 子书章列表为空,跳过", "book=", tostring(bid))
+                return true
+            end
+            return nil, "微信读书返回的章节列表为空"
         end
-        if not step("fetch", i, #chapter_list, ch.title) then return nil, "已取消" end
-        local good, data = pcall(function()
-            return deps.annotations:fetch_chapter(deps.book_id, ch.uid)
-        end)
-        -- 预算按"网络请求次数"计:缓存命中(resumed)免费,失败的尝试也占额度。
-        if not (good and type(data) == "table" and data.resumed) then
-            fresh_fetches = fresh_fetches + 1
+        -- 续传起点按书取:优先 deps.chapter_starts[bid](多书按书),回退 deps.chapter_start。
+        -- 多书强制 append=false 时会在此被重置为 1(整体从 .orig 重建)。
+        local chapter_start = math.max(1, tonumber(
+            (deps.chapter_starts and deps.chapter_starts[bid]) or deps.chapter_start) or 1)
+        if not append then chapter_start = 1 end
+        local selected_end = #chapter_list
+        if (not multi_book) and (not skip_resumed) and chapter_budget then
+            selected_end = math.min(#chapter_list, chapter_start + chapter_budget - 1)
         end
-        local chapter_rate_limited = good and type(data) == "table" and data.rate_limited == true
-        local skipped_completed_cache = good and type(data) == "table"
-            and data.resumed and skip_resumed
-        local chapter_completed = false
-        if chapter_rate_limited then
-            rate_limited = true
-            rate_limit_wait = tonumber(data.rate_limit_wait) or rate_limit_wait
-            chapters_pending = #chapter_list - i + 1
-        elseif good and type(data) == "table" and data.resumed and skip_resumed then
-            -- 完整缓存只扫描以寻找新增/缺失章节,不重复写库和重注入旧章节。
-            chapter_completed = true
+        local i = chapter_start
+        local book_next = chapter_start
+        -- 本书独立的待处理章节计数,最后并入聚合 chapters_pending 并记入 per_book。
+        local book_pending = 0
+        -- 本书批次起止(逐书记录,避免全局累加器被末本覆盖,P1#4)。
+        local book_batch_start, book_batch_end
+        while i <= #chapter_list do
+            local ch = chapter_list[i]
+            ch.book_id = bid
+            if fetch_budget and book_fresh_fetches >= fetch_budget then
+                book_pending = book_pending + (#chapter_list - i + 1)
+                break
+            end
+            if (not multi_book) and (not skip_resumed) and i > selected_end then
+                book_pending = book_pending + (#chapter_list - i + 1)
+                break
+            end
+            if not step("fetch", i, #chapter_list, ch.title) then return nil, "已取消" end
+            local good, data = pcall(function()
+                return deps.annotations:fetch_chapter(bid, ch.uid)
+            end)
+            -- 预算按"网络请求次数"计:缓存命中(resumed)免费,失败的尝试也占额度。
+            if not (good and type(data) == "table" and data.resumed) then
+                book_fresh_fetches = book_fresh_fetches + 1
+            end
+            local chapter_rate_limited = good and type(data) == "table" and data.rate_limited == true
+            local skipped_completed_cache = good and type(data) == "table"
+                and data.resumed and skip_resumed
+            if chapter_rate_limited then
+                book_rate_limited = true
+                book_rate_limit_wait = tonumber(data.rate_limit_wait) or book_rate_limit_wait
+        elseif good and type(data) == "table" and data.resumed and skip_resumed and not multi_book then
+            -- 单书增量续传:当前注入版已含旧批内容,完整缓存只扫描寻找新增/缺失章节,
+            -- 不重复写库和重注入旧章节。多书场景恒为全量重建(append=false/.orig),
+            -- 旧批内容不在当前书,必须随本次重建重新注入,故多书不在此跳过、走下一分支
+            -- 合并缓存内容,避免「第二批只新增一本书导致其他书的旧划线和想法消失」(P1#3)。
         elseif good and type(data) == "table" and data.underline_request_ok ~= false then
-            total_underlines = total_underlines + (data.underline_count or 0)
-            total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
-            local data_errors = #(data.errors or {})
-            if data_errors > 0 then
-                partial_errors = partial_errors + 1
-                last_error = tostring((data.errors or {})[1] or "章节数据不完整")
-                chapters_pending = #chapter_list - i + 1
-            else
-                local save_ok = true
+                -- 断点缓存命中(resumed)不算网络成功,不能复位熔断计数:
+                -- 离线续传时散布的缓存命中会把计数清零,让熔断永不触发。
+                if not data.resumed then book_consecutive_hard = 0 end
+                if #(data.errors or {}) > 0 then partial_errors = partial_errors + 1 end
+                total_underlines = total_underlines + (data.underline_count or 0)
+                total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                if (data.underline_count or 0) > 0 then
+                    fetched[#fetched + 1] = {
+                        uid = ch.uid, title = ch.title, book_id = bid,
+                        underlines = data.underlines, review_map = data.review_map,
+                    }
+                end
                 if #(data.review_groups or {}) > 0 then
-                    local ok_save, saved = pcall(deps.save_thoughts, deps.book_id, ch.uid, data.review_groups)
+                    local ok_save, saved = pcall(deps.save_thoughts, ch.book_id, ch.uid, data.review_groups)
                     if ok_save and saved then
                         thoughts_saved = thoughts_saved + 1
                     else
-                        save_ok = false
                         save_failures = save_failures + 1
-                        last_error = "想法缓存保存失败:" .. tostring(saved or "未知错误")
-                        chapters_pending = #chapter_list - i + 1
+                        -- 统一复合键 book_id+UID,与 epub_inject 的 thoughts_linked_by_uid 对齐
+                        -- (多书场景同 uid 不串键,成功/失败数量才准)。见评审二轮 P1#5。
+                        thought_save_failed[ck(ch.book_id, ch.uid)] = true
                     end
                 end
-                if save_ok then
-                    if (data.underline_count or 0) > 0 then
-                        fetched[#fetched + 1] = {
-                            uid = ch.uid, title = ch.title,
-                            underlines = data.underlines, review_map = data.review_map,
+            else
+                hard_failures = hard_failures + 1
+                book_consecutive_hard = book_consecutive_hard + 1
+                if not good then
+                    last_error = tostring(data)
+                elseif type(data) == "table" then
+                    last_error = tostring((data.errors or {})[1] or last_error or "接口返回异常")
+                end
+                -- 断网熔断:连续多章整章失败(每章重试要吃满超时)不能逐章磨完全书。
+                -- 最后一章失败时不熔断,让已取到的数据走完正常出口。
+                if book_consecutive_hard >= 3 and i < #chapter_list then
+                    if multi_book then
+                        -- 多书:本书熔断,记录完整续传状态(下一游标=失败章、待处理=剩余章、总量)
+                        -- 继续下一本,不让第一本拖垮整批(评审二轮 P1#2);failed 标记阻止
+                        -- sync_task 误写 .completed(评审三轮 P1#1),下次仍可从 i 续传(断点缓存命中)。
+                        local remaining = #chapter_list - i + 1
+                        per_book[bid] = {
+                            failed = true,
+                            error = string.format("连续 %d 章拉取失败,已中止本书同步", book_consecutive_hard),
+                            next_index = i, pending = remaining,
+                            total = #chapter_list, start = chapter_start,
                         }
+                        return false, per_book[bid].error
                     end
-                    chapter_completed = true
-                else
-                    -- 想法落盘失败时不把本章交给注入器,下次从本章重试。
+                    return nil, string.format("连续 %d 章拉取失败,已中止同步。\n最后错误:%s",
+                        book_consecutive_hard, short_err(last_error))
                 end
             end
-        else
-            hard_failures = hard_failures + 1
-            if not good then
-                last_error = tostring(data)
-            elseif type(data) == "table" then
-                last_error = tostring((data.errors or {})[1] or last_error or "接口返回异常")
+            if not chapter_rate_limited and not skipped_completed_cache then
+                book_batch_start = book_batch_start or i
+                book_batch_end = i
+                chapters_processed = chapters_processed + 1
+                if good and type(data) == "table" and data.underline_request_ok ~= false
+                    and #(data.errors or {}) == 0 then
+                    chapters_fetch_succeeded = chapters_fetch_succeeded + 1
+                end
             end
-            chapters_pending = #chapter_list - i + 1
-        end
-        if chapter_completed and not skipped_completed_cache then
-            batch_start_index = batch_start_index or i
-            batch_end_index = i
-            chapters_processed = chapters_processed + 1
-            if good and type(data) == "table" and data.underline_request_ok ~= false
-                and #(data.errors or {}) == 0 then
-                chapters_fetch_succeeded = chapters_fetch_succeeded + 1
+            book_next = book_rate_limited and i or (i + 1)
+            if book_rate_limited then
+                book_pending = book_pending + (#chapter_list - book_next + 1)
+                break
             end
+            i = i + 1
         end
-        if not chapter_completed then
-            next_index = i
-            break
+        -- 本书限速状态聚合进报告级 rate_limited(多书任一书被限即整体标记,见 P1#4)。
+        if book_rate_limited then
+            rate_limited = true
+            rate_limit_wait = book_rate_limit_wait or rate_limit_wait
         end
-        next_index = i + 1
-        i = i + 1
+        if book_pending == 0 and book_next ~= nil and book_next <= #chapter_list then
+            book_pending = book_pending + (#chapter_list - book_next + 1)
+        end
+        -- 记录本书续传游标,并并入聚合 chapters_pending / next_index(P1#5)。
+        per_book[bid] = {
+            next_index = book_next,
+            pending = book_pending,
+            total = #chapter_list,
+            start = chapter_start,
+            batch_start = book_batch_start,
+            batch_end = book_batch_end,
+        }
+        chapters_pending = chapters_pending + book_pending
+        next_index = book_next
+        return true
     end
-    if chapters_pending == 0 and next_index <= #chapter_list then
-        chapters_pending = #chapter_list - next_index + 1
+
+    for _, bid in ipairs(book_ids) do
+        local ok, err = fetch_book(bid)
+        if ok == nil then
+            -- 硬中止(用户取消 / 单书致命错误):直接退出整个同步。
+            return nil, err
+        elseif ok == false then
+            -- 多书:本书软失败(章节列表拉取失败 / 连续失败熔断),记录后继续下一本,
+            -- 不让第一本拖垮整批(评审二轮 P1#2)。
+            failed_books[#failed_books + 1] = bid
+        end
+    end
+    -- 聚合批次起止:取各书 batch_start 最小 / batch_end 最大,避免末本覆盖整体范围(P1#4);
+    -- 逐书 range 已存入 per_book,报告与续传依据可同时展示聚合摘要与逐书明细。
+    batch_start_index = nil
+    batch_end_index = nil
+    for _, bid in ipairs(book_ids) do
+        local pb = per_book[bid]
+        if pb and pb.batch_start then
+            batch_start_index = math.min(batch_start_index or pb.batch_start, pb.batch_start)
+            batch_end_index = math.max(batch_end_index or pb.batch_end, pb.batch_end)
+        end
+    end
+    -- 多书部分失败:若所有书都软失败且无任何章节数据,整体报错;
+    -- 只要有书取到数据,就继续注入成功的部分(其余书的章节留在 fetched 之外,P1#2)。
+    if #failed_books > 0 and #fetched == 0 then
+        local msgs = {}
+        for _, bid in ipairs(failed_books) do
+            msgs[#msgs + 1] = tostring(bid) .. ": " .. tostring((per_book[bid] and per_book[bid].error) or "拉取失败")
+        end
+        return nil, "以下书同步失败:\n" .. table.concat(msgs, "\n")
     end
     local function with_batch_fields(report)
         report.batch_start = batch_start_index
         report.batch_end = batch_end_index
         report.chapters_processed = chapters_processed
         report.chapters_fetch_succeeded = chapters_fetch_succeeded
-        report.batch_limit = chapter_budget or fetch_budget or #chapter_list
+        report.batch_limit = chapter_budget or fetch_budget or chapters_total_all
+        -- 按书续传游标,供调用方逐书写 state.json / .completed(P1#5)。
+        report.per_book = per_book
         return report
     end
     if hard_failures > 0 and #fetched == 0 then
@@ -214,12 +350,12 @@ function Sync.run(deps)
                 hard_failures, short_err(last_error))
         end
         if chapters_pending > 0 and not rate_limited then
-            return nil, string.format("本批 %d 章都没有划线;还剩 %d 章,再次同步继续拉取",
-                #chapter_list - chapters_pending, chapters_pending)
+            return nil,                 string.format("本批 %d 章都没有划线;还剩 %d 章,再次同步继续拉取",
+                chapters_total_all - chapters_pending, chapters_pending)
         end
         if not skip_resumed and not rate_limited then return nil, "这本书在微信读书里没有划线" end
         return with_batch_fields{
-            no_changes = true, chapters_total = #chapter_list,
+            no_changes = true, chapters_total = chapters_total_all,
             chapters_pending = chapters_pending, next_index = next_index,
             total_underlines = 0, total_thought_entries = 0,
             chapters_with_data = 0, chapters_matched = 0,
@@ -241,29 +377,36 @@ function Sync.run(deps)
         -- 指纹 = 源书大小 + 匹配算法版本:换书或改算法都让旧映射作废重建。
         local map_source = file_exists(backup) and backup or doc_path
         map_signature = tostring(U.file_size(map_source) or 0) .. "@" .. tostring(ChapterMap.ALGO_VERSION)
-        local raw = U.read_file(deps.map_cache_path, true)
-        if raw then
-            local ok_decode, decoded = pcall(Json.decode, raw)
-            if ok_decode and type(decoded) == "table"
-                and tostring(decoded.signature) == map_signature
-                and type(decoded.map) == "table" then
-                map_store = decoded.map
+        -- 多书:汇总每本书的独立缓存文件(命名空间化键);单书:沿用原缓存文件。
+        map_store = {}
+        for _, bid in ipairs(book_ids) do
+            local cp = cache_path_for(bid)
+            local raw = U.read_file(cp, true)
+            if raw then
+                local ok_decode, decoded = pcall(Json.decode, raw)
+                if ok_decode and type(decoded) == "table"
+                    and tostring(decoded.signature) == map_signature
+                    and type(decoded.map) == "table" then
+                    for k, v in pairs(decoded.map) do
+                        map_store[ck(bid, k)] = v
+                    end
+                end
             end
         end
-        map_store = map_store or {}
     end
 
     -- 缓存值格式:false = 确认无法匹配;{hrefs={...}, num=true|nil} =
     -- 目标文件列表(拆分章多目标),num 表示单目标强投票、允许数字兜底。
     local known, todo = {}, {}
     for _, ch in ipairs(fetched) do
-        local cached = map_store and map_store[tostring(ch.uid)]
+        local key = ck(ch.book_id, ch.uid)
+        local cached = map_store and map_store[key]
         if cached == nil then
             todo[#todo + 1] = ch
         elseif cached == false then
-            known[tostring(ch.uid)] = false
+            known[key] = false
         elseif type(cached) == "table" and type(cached.hrefs) == "table" and #cached.hrefs > 0 then
-            known[tostring(ch.uid)] = cached
+            known[key] = cached
         else
             todo[#todo + 1] = ch
         end
@@ -289,13 +432,15 @@ function Sync.run(deps)
     local spine_total = #(map_meta.spine or {})
     local mapped_new, unmatched_new = {}, {}
 
-    -- B:spine 正文(原始 HTML)持久化缓存。仅当调用方显式开启 deps.spine_cache 且存在
-    -- map 缓存、且本批确有新章节要匹配(todo>0)时启用;测试不开启,行为完全不变。
+    -- B:spine 正文持久化缓存。仅当调用方显式开启 deps.spine_cache 且存在 map
+    -- 缓存、且本批确有新章节要匹配(todo>0)时启用;测试不开启,行为完全不变。
     -- 第 2 批起直接读缓存文本,不再从 EPUB 解压每个 spine 文件、不再重复 normalize。
-    -- 单书场景 map_cache_path 为字符串路径;缓存目录取 map.json 同目录下的 spine-<指纹>。
     local spine_cache
     if deps.spine_cache and deps.map_cache_path and #todo > 0 then
-        local sc_dir = SpineCache.dir_for(deps.map_cache_path, map_signature)
+        -- map_cache_path 可能是函数(多书),需先解析为字符串;spine 缓存按 EPUB 物理文件,
+        -- 多书共享同一本地书,取 book_ids[1] 即可。
+        local resolved_mcp = cache_path_for(book_ids[1])
+        local sc_dir = SpineCache.dir_for(resolved_mcp, map_signature)
         if sc_dir then
             spine_cache = SpineCache.open(sc_dir, map_signature)
             logger.info("[撷思][SpineCache]", spine_cache and (spine_cache:warm() and "warm" or "cold") or "disabled",
@@ -374,60 +519,78 @@ function Sync.run(deps)
     -- 合并:按 fetched 原序拼装(拆分章一 uid 多行),新结果回写缓存。
     local new_rows_by_uid = {}
     for _, row in ipairs(mapped_new) do
-        local rows = new_rows_by_uid[row.chapter_uid] or {}
+        local key = ck(row.book_id, row.chapter_uid)
+        local rows = new_rows_by_uid[key] or {}
         rows[#rows + 1] = row
-        new_rows_by_uid[row.chapter_uid] = rows
+        new_rows_by_uid[key] = rows
     end
     local unmatched_uid = {}
     for _, row in ipairs(unmatched_new) do
-        if row.reason == "no_hit" then unmatched_uid[tostring(row.uid)] = true end
+        if row.reason == "no_hit" then unmatched_uid[ck(row.book_id, row.uid)] = true end
     end
     local mapped, unmatched = {}, {}
     local matched_uids = {}
     for _, ch in ipairs(fetched) do
-        local uid = tostring(ch.uid)
-        local cached = known[uid]
+        local key = ck(ch.book_id, ch.uid)
+        local cached = known[key]
         if type(cached) == "table" then
-            matched_uids[uid] = true
+            matched_uids[key] = true
             local quote_only = (not cached.num or #cached.hrefs > 1) or nil
             for _, href in ipairs(cached.hrefs) do
                 mapped[#mapped + 1] = {
-                    chapter_uid = uid, href = tostring(href),
+                    chapter_uid = tostring(ch.uid), href = tostring(href),
                     underlines = ch.underlines, review_map = ch.review_map or {},
-                    quote_only = quote_only,
+                    quote_only = quote_only, book_id = ch.book_id,
                 }
             end
         elseif cached == false then
-            unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_hit"}
-        elseif new_rows_by_uid[uid] then
-            matched_uids[uid] = true
+            unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
+        elseif new_rows_by_uid[key] then
+            matched_uids[key] = true
             local hrefs = {}
-            for _, row in ipairs(new_rows_by_uid[uid]) do
-                mapped[#mapped + 1] = row
+            for _, row in ipairs(new_rows_by_uid[key]) do
+                mapped[#mapped + 1] = {
+                    chapter_uid = tostring(ch.uid), href = row.href,
+                    underlines = ch.underlines, review_map = ch.review_map or {},
+                    quote_only = row.quote_only, book_id = ch.book_id,
+                }
                 hrefs[#hrefs + 1] = row.href
             end
             if map_store then
-                map_store[uid] = {hrefs = hrefs,
-                    num = (#hrefs == 1 and not new_rows_by_uid[uid][1].quote_only) or nil}
+                map_store[key] = {hrefs = hrefs,
+                    num = (#hrefs == 1 and not new_rows_by_uid[key][1].quote_only) or nil}
             end
-        elseif unmatched_uid[uid] then
-            unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_hit"}
-            if map_store then map_store[uid] = false end
+        elseif unmatched_uid[key] then
+            unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_hit", book_id = ch.book_id}
+            if map_store then map_store[key] = false end
         else
             -- no_data(无划线)章节:不入缓存,下批有数据时再匹配。
-            unmatched[#unmatched + 1] = {uid = uid, title = ch.title, reason = "no_data"}
+            unmatched[#unmatched + 1] = {uid = tostring(ch.uid), title = ch.title, reason = "no_data", book_id = ch.book_id}
         end
     end
     if deps.map_cache_path and map_store then
-        local ok_encode, encoded = pcall(Json.encode, {signature = map_signature, map = map_store})
-        if ok_encode then U.atomic_write(deps.map_cache_path, encoded, true) end
+        -- 按书归组写回各自缓存文件(命名空间键拆回纯 uid);单书即原文件原格式。
+        local by_book = {}
+        for key, val in pairs(map_store) do
+            local bid, uid = key, key
+            if multi_book then bid, uid = key:match("^(.-)/(.*)$") end
+            bid = bid or book_ids[1]
+            uid = uid or key
+            by_book[bid] = by_book[bid] or {}
+            by_book[bid][uid] = val
+        end
+        for bid, m in pairs(by_book) do
+            local cp = cache_path_for(bid)
+            local ok_encode, encoded = pcall(Json.encode, {signature = map_signature, map = m})
+            if ok_encode then U.atomic_write(cp, encoded, true) end
+        end
     end
     -- 未匹配章节连带损失的划线数(报告要能说清"失败带走了多少")。
     local underlines_by_uid = {}
-    for _, ch in ipairs(fetched) do underlines_by_uid[tostring(ch.uid)] = #(ch.underlines or {}) end
+    for _, ch in ipairs(fetched) do underlines_by_uid[ck(ch.book_id, ch.uid)] = #(ch.underlines or {}) end
     local unmatched_underlines = 0
     for _, row in ipairs(unmatched) do
-        unmatched_underlines = unmatched_underlines + (underlines_by_uid[tostring(row.uid)] or 0)
+        unmatched_underlines = unmatched_underlines + (underlines_by_uid[ck(row.book_id, row.uid)] or 0)
     end
 
     if #mapped == 0 then
@@ -435,7 +598,7 @@ function Sync.run(deps)
             return nil, "没有任何章节能匹配到本地书,请确认绑定的和本地打开的是同一本书"
         end
         return with_batch_fields{
-            no_changes = true, chapters_total = #chapter_list,
+            no_changes = true, chapters_total = chapters_total_all,
             chapters_pending = chapters_pending, next_index = next_index,
             total_underlines = total_underlines,
             total_thought_entries = total_thought_entries,
@@ -449,15 +612,16 @@ function Sync.run(deps)
 
     if not step("inject", 0, 1) then return nil, "已取消" end
     -- 注入到中间文件(无 .epub 后缀,不会闪现在书架),成功后原子换位。
+    -- 多书时把所有绑定书的 mapped 章节合并进同一次注入,book_ids 一并列进 MARKER。
     local temp_dest = doc_path .. ".pickthought-new"
-    local stats, inject_err = deps.inject(src, deps.book_id, mapped, temp_dest,
-        {append = append, meta = meta})
+    local stats, inject_err = deps.inject(src, book_ids[1], mapped, temp_dest,
+        {append = append, meta = meta, book_ids = book_ids})
     if not stats then return nil, inject_err end
 
     -- 重叠划线被合并的,把想法并进存活锚点的组:点一个虚线看到这一段全部想法。
     if deps.merge_thoughts then
         for _, merge in ipairs(stats.merges or {}) do
-            pcall(deps.merge_thoughts, deps.book_id, merge.uid, merge.from, merge.into)
+            pcall(deps.merge_thoughts, merge.book_id or book_ids[1], merge.uid, merge.from, merge.into)
         end
     end
 
@@ -483,6 +647,11 @@ function Sync.run(deps)
     local underlines_injected = math.min(total_underlines,
         math.max(0, tonumber(stats.underlines_resolved) or 0))
     local thoughts_injected = math.max(0, tonumber(stats.thoughts_linked) or 0)
+    for uid, count in pairs(stats.thoughts_linked_by_uid or {}) do
+        if thought_save_failed[tostring(uid)] then
+            thoughts_injected = thoughts_injected - (tonumber(count) or 0)
+        end
+    end
     thoughts_injected = math.min(total_thought_entries, math.max(0, thoughts_injected))
     return with_batch_fields{
         dest = doc_path,
@@ -497,7 +666,7 @@ function Sync.run(deps)
         inject_unmatched = stats.unmatched,
         thoughts_saved = thoughts_saved,
         save_failures = save_failures,
-        chapters_total = #chapter_list,
+        chapters_total = chapters_total_all,
         chapters_with_data = #fetched,
         chapters_matched = (function()
             local n = 0
