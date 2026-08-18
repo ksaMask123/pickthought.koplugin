@@ -55,7 +55,7 @@
 
   <p style="color:var(--muted);font-size:13.5px">
     本日志按时间线记录 PR #13（多书绑定）历次修改，含修改日期、动机、具体改动点、影响范围与校验结果。
-    已落地的评审轮次：<strong>第二轮 7 项</strong>（P1#1–P1#5、P2#6、P2#7，见下）与<strong>第三轮 4 项 P1 + 收尾</strong>（失败书误标完成、离线重建登录拦截、聚合坐标误触发自动批、报告范围末本覆盖，及 data.data 旧字段兼容），并完成基于最新 main 的 rebase 解冲突。
+    已落地的评审轮次：<strong>第二轮 7 项</strong>（P1#1–P1#5、P2#6、P2#7）、<strong>第三轮 4 项 P1 + 收尾</strong>（失败书误标完成、离线重建登录拦截、聚合坐标误触发自动批、报告范围末本覆盖，及 data.data 旧字段兼容）、<strong>第四轮 P0 + P1#2/#3/#4/#5</strong>（内存冷却回归、失败章节推进游标、多书聚合范围、自动同步上下文、离线重注入口，并修复 book_actions 语法损坏），并完成基于最新 main 的 rebase 解冲突。
   </p>
 
   <div class="timeline">
@@ -341,11 +341,32 @@
       </div>
     </div>
 
+    <!-- ============ round4-feedback ============ -->
+    <div class="entry">
+      <div class="date">2026-08-18</div>
+      <h2>四轮评审：P0 + P1#2/#3/#4/#5 修复 + book_actions 语法损坏修复 <span class="tag p1">P0/P1</span></h2>
+      <div class="card">
+        <div class="kv">
+          <div class="k">动机</div><div class="v">原作者 M 基于 <code>562687a</code> 四轮复审指出合并后仍遗留若干阻塞项与回归，CI 实测 <code>183 passed / 7 failed</code>；逐项落实并让 CI 回到全绿。</div>
+          <div class="k">改动</div><div class="v">
+            <ul>
+              <li><strong>P0 内存冷却回归</strong>：rebase 合并丢失 <code>_is_memory_error</code> / <code>_fork_memory_cooldown_remaining</code> / <code>_mark_fork_memory_failure</code> 及导出，<code>start()</code> 启动即崩；以 <code>a8c2e1f</code> 完整实现为基线恢复并补初始化 / fork 失败标记 / 手动重试。</li>
+              <li><strong>P1#3 失败章节推进游标</strong>：部分拉取失败 / 想法缓存写入失败 / 单章硬失败不再推进 <code>book_next</code>；按书记录第一个失败章节，失败章不进注入、<code>next_index</code> 停在失败章、<code>pending</code> 保留剩余、失败书不生成 <code>.completed</code>（覆盖部分失败 / 缓存写入 / 缓存命中后失败 / 多书）。</li>
+              <li><strong>P1#4 多书聚合范围</strong>：不同远程书的章节坐标是独立序列，多书聚合不再把 <code>batch_start/batch_end</code> 拼成单一连续区间（多书置 nil），真实逐书 range 由 <code>per_book</code> 承载，报告只展示聚合数量 + 逐书明细。</li>
+              <li><strong>P1#2 自动同步上下文</strong>：<code>_maybe_auto_batch</code> 引用了未定义的 <code>operation_context</code>，<code>onPageUpdate</code> 的 pcall 把自动 / 确认同步启动错误吞掉导致静默失效；获取绑定后捕获阅读上下文，切书后自动过期。</li>
+              <li><strong>P1#5 离线重注入口</strong>：改为所有绑定书缓存齐全（均有 <code>chapters.json</code>）才提供入口，避免新增绑定未同步书时给出必然失败的离线重注入口。</li>
+              <li><strong>额外：book_actions 语法损坏</strong>：<code>562687a</code> 的 rebase 合并在 <code>book_actions</code> 留下结构错乱（未闭合按钮 + 孤儿 <code>callback</code> + 多余 <code>end</code>），会导致插件<strong>无法加载</strong>；CI 因不加载 <code>main.lua</code> 未能捕获，已修复并 <code>loadfile</code> 复校通过。</li>
+            </ul>
+          </div>
+          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>191</b> 通过 / <b>0</b> 失败</span>（新增 / 调整 P1#3×5、P1#4×2）。提交 <code>1e1dc12</code> 并 push 至 fork <code>feature/multi-book</code>。PR 描述同步更新（183/7 → 191/0）。</div>
+        </div>
+      </div>
+    </div>
 
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>168 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>191 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
