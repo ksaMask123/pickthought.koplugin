@@ -62,9 +62,9 @@
     <div><span>主改动模块</span><br><b>performance_mode.lua</b></div>
     <div><span>PR 编号</span><br><b>#17（上游 Mr54233）</b></div>
     <div><span>分支</span><br><b>pr/sliding-degrade</b></div>
-    <div><span>提交哈希</span><br><b>adc0730 + c77ef96 + aa758fb</b></div>
-    <div><span>基线</span><br><b>upstream/main 38c352c（已 rebase）</b></div>
-    <div><span>全套测试</span><br><b>本分支 63 passed / 0 failed（含本 PR 9 项性能模式用例；分支基线较旧，全量套件待合入 upstream 后统一跑）</b></div>
+    <div><span>提交哈希</span><br><b>adc0730 + c77ef96 + aa758fb + 1daca8f + d3c11ea + fcd4b22 + b8d4f43</b></div>
+    <div><span>基线</span><br><b>upstream/main a8c2e1f（已 rebase）</b></div>
+    <div><span>全套测试</span><br><b>本分支 190 passed / 0 failed（全量套件：含本 PR 性能模式用例 + 前台 _sync_run 适配器集成用例）</b></div>
   </div>
 
   <h2>一、动机</h2>
@@ -127,7 +127,7 @@
   <table>
     <tr><th>关卡</th><th>结果</th></tr>
     <tr><td>LuaJIT 语法</td><td class="ok">performance_mode.lua / epub_inject.lua / test_performance_mode.lua 等 OK</td></tr>
-    <tr><td>单元测试</td><td class="ok">本分支 63 passed / 0 failed（含本 PR 9 项性能模式用例；分支基线较旧，全量套件待合入 upstream 后统一跑）</td></tr>
+    <tr><td>单元测试</td><td class="ok">本分支 190 passed / 0 failed（全量套件：含本 PR 性能模式用例 + 前台 _sync_run 适配器集成用例）</td></tr>
     <tr><td>加载期核验（koplugin-load-check）</td><td class="ok">类顺序 OK / 无新 <code>local _</code> 遮蔽 / 代理 LOAD_OK</td></tr>
     <tr><td>diff 复核</td><td class="ok">仅 6 文件：新增 performance_mode.lua + test_performance_mode.lua，修改 epub_inject.lua / run.lua / test_epub_inject.lua / test_sync.lua（共 +301 / −0）</td></tr>
   </table>
@@ -158,6 +158,17 @@
     <b>影响范围</b>：仅 <code>performance_mode.lua</code> 时钟实现与 <code>main.lua</code> 前台 injct 包装；注入产物内容不变，向后兼容。
   </div>
 
+  <h2>九、2026-08-18 收尾复核（作者 #17 收尾意见，提交 b8d4f43）</h2>
+  <div class="card">
+    <b>动机</b>：作者 #17 收尾意见——前台禁用阻塞式 <code>usleep</code> 的测试<strong>必须走 main.lua 的 <code>_sync_run</code> 真实适配器</strong>（而非手动构造 no-op <code>PerformanceMode</code> 再直接喂给 inject_copy），方能真正锁定「前台适配器确实向 inject 传入 no-op rest、整条前台路径不调用 usleep」。<br>
+    <b>具体改动</b>：
+    <ul>
+      <li><b>新增 tests/test_sync_frontend.lua（集成测试）</b>：用 <code>loadfile</code> 加载<strong>真实 main.lua</strong> 得到 Plugin 类，桩掉 KOReader 专属模块（WidgetContainer:extend / ui.trapper / ffi/util.usleep 等）与 pickthought 子模块（thoughts / web_fetch / epub_reader / epub_inject），直接调用 <code>Plugin._sync_run(...)</code> 走真实注入适配器；捕获适配器透传给 <code>inject_copy</code> 的 <code>options.perf</code>，断言其存在且调用 <code>perf._rest()</code> 时 <code>ffi/util.usleep</code> 调用次数为 0。并以「默认 rest（ffi/util.usleep 存在）确实触发 usleep」做对照，证明 spy 有效、区分真实。</li>
+      <li><b>修正桩根因</b>：<code>EpubReader.each_spine</code> 的真实签名是 <code>callback(item, content, err, index)</code>（epub_reader.lua:156 把章节 HTML 作为第 2 参喂出）；旧桩只回传 <code>item</code> 导致 <code>content</code> 为 nil，ChapterMap 引文投票无素材、章节匹配全失败（此前 189 passed / 1 failed 的根因）。修正为回传 <code>(item, 章节 HTML, nil, 1)</code> 后匹配成功。</li>
+      <li><b>迁移</b>：<code>tests/test_epub_inject.lua</code> 中手动构造 no-op <code>PerformanceMode</code> 的前台用例已删除，改为指向上述集成测试，避免重复且更贴近真实路径；<code>tests/run.lua</code> 登记新模块。</li>
+    </ul>
+    <b>校验</b>：全量 <code>tests/run.lua</code> → <b>190 passed / 0 failed</b>（较上轮 189 + 本集成用例 1）。
+  </div>
+
 </div>
-</body>
 </html>
