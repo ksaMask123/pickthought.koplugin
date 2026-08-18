@@ -32,12 +32,12 @@
 <div class="wrap">
   <h1>pickthought.koplugin · PR#15 DB 完整性校验 更新日志</h1>
   <div class="meta">
-    <div>日期</div><div>2026-08-14</div>
+    <div>日期</div><div>2026-08-19</div>
     <div>PR</div><div><a href="https://github.com/Mr54233/pickthought.koplugin/pull/15">#15 DB 完整性校验与 WAL 折叠</a></div>
     <div>上游 base</div><div><code>upstream/main</code> <code>38c352c</code></div>
-    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>d4aa811</code></div>
-    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 最新一轮意见已落实（d4aa811），待作者 flip</div>
-    <div>单测</div><div><span class="ok">全量 195 passed / 0 failed</span>（含 DB 完整性 20/0；本地 LuaJIT 校验绿）</div>
+    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>5f57dd9</code></div>
+    <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 第4轮意见已落实（5f57dd9），待作者 flip</div>
+    <div>单测</div><div><span class="ok">全量 203 passed / 0 failed</span>（含 DB 完整性 28/0；本地 LuaJIT 校验绿）</div>
     <div>设备部署</div><div><span class="warn">未部署</span>（待授权；本 PR 仅改 <code>thought_db.lua</code>，属 SQLite 层，部署风险低）</div>
   </div>
 
@@ -165,9 +165,26 @@
     <b>测试桩修复（关键）</b>：旧 <code>tests/stubs.lua</code> 的 <code>libs/libkoreader-lfs.attributes</code> 恒返回 <code>nil</code>（无错误串），使 <code>path_exists_distinct</code> 把<b>所有路径</b>误判为 <code>"uncheckable"</code>，导致 <code>isolate_corrupt</code> 在"主库状态无法确认"守卫处静默中止、真实文件移动测试全红。新桩忠实返回存在性（存在→属性表 / 不存在→<code>nil,"No such file or directory"</code>），目录与 <code>==\"directory\"</code> 行为不变。<br>
     <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">195 passed / 0 failed</span>（含 DB 完整性 20/0，5 个真实文件隔离用例由红转绿）。<br>
     <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 目标预留 / 存在性判定与测试；未引入破坏性变更，向后兼容。
+  <h2>十、2026-08-19 第4轮复审（提交 5f57dd9，原子无覆盖预留+异常状态判定+格式校验）</h2>
+  <div class="box">
+    <b>动机</b>：作者在 2026-08-18T11:27:10Z 的第4轮意见，要求把隔离流程的最后几处"极端失败边界"补严：① 损坏备份目标须<b>原子无覆盖</b>预留（探测后 rename 仍有竞态、且可能覆盖已有 <code>.corrupt-*</code>）；② <code>open</code> 须区分"明确不存在"与"无法确认"（<code>.isolated</code> 读取失败 / 主库缺失但仍有孤立 sidecar 时，须阻断自动建空库，而非交给 SQLite 静默建空）；③ 校验 <code>integrity_check</code> 的<b>返回格式</b>（非标准结果按过程失败处理，保留原库）。本提交逐条落实。<br>
+    <b>具体改动（仅 thought_db.lua + 测试）</b>：
+    <ul>
+      <li><b>原子无覆盖预留（意见①）</b>：新增 <code>atomic_claim(target)</code>——Linux 下用 <code>ffi</code> 调 C <code>open(O_CREAT|O_EXCL, 0600)</code> <b>原子占用</b>目标名（文件已存在则立即失败，绝不覆盖），非 Linux / 无 ffi 退化为 <code>io.open</code> 探测 + <code>os.rename</code>。无论哪条路径，都先确认 <code>target</code> 空闲，才把主库内容移入；已有 <code>.corrupt-*</code> 备份永不被覆盖。<code>reserve_corrupt_main</code> 整体改用该原子预留，彻底消除 TOCTOU 与覆盖旧备份两类隐患。</li>
+      <li><b>异常状态判定（意见②）</b>：移除冗余 <code>is_isolated</code>，改由 <code>path_exists_distinct</code> 统一承担存在性判定，返回 <code>(exists, state)</code>。新增 <code>open</code> 前置守卫：<br>
+        · <code>.isolated</code> 标记<b>读取失败（权限/IO）</b> → 保守阻断自动重建，不当成"无标记"而掩盖隔离态；<br>
+        · 主库状态<b>无法确认（权限/IO）</b> → 阻断，绝不交给 SQLite 建空库；<br>
+        · 主库缺失但仍有<b>孤立 sidecar</b>（<code>-wal</code>/<code>-shm</code>）→ 阻断，不静默建空库；<br>
+        · 仅<b>主库确缺失且无 sidecar</b> 才允许正常新建（首次打开）。</li>
+      <li><b>返回格式校验（意见③）</b>：<code>integrity_check</code> 新增格式检查——无结果行 / 结果行非表 / 首列非字符串 → 抛错，按"过程失败"处理（保留原库、不触发隔离），避免把格式异常误判为"确认损坏"而隔离。</li>
+    </ul>
+    <b>测试（tests/test_thought_db_integrity.lua 新增 8 用例）</b>：旧备份内容不被新预留覆盖、标记读取失败阻断、主库无法确认阻断、孤立 sidecar 阻断、正常新建放行、<code>integrity_check</code> 返回格式异常三类（空结果 / 行非表 / 首列非字符串）；全量 <span class="ok">203 passed / 0 failed</span>（含 DB 完整性 28/0）。<br>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 目标预留 / 存在性判定与测试；未引入破坏性变更，向后兼容。
   </div>
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>d4aa811</code>。</p>
+  </div>
+
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>5f57dd9</code>。</p>
 </div>
 </body>
 </html>
