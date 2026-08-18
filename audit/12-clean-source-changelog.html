@@ -298,6 +298,34 @@
         </div>
       </div>
     </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-18（评审五轮 · 取消传播回归）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-18 默认复制路径取消传播意见（提交 3d74d61）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-18 指出：默认 <code>copy_file</code> 包装器（未传 <code>deps.copy_file</code> 时 <code>Sync.run</code> 用的 <code>U.copy_file_stream</code> 包装）的内层进度回调只调用 <code>step("copy", ...)</code> 却<b>未 return 其布尔值</b>；当 <code>progress</code> 返回 <code>false</code>（用户取消）时，该 <code>false</code> 无法透传到 <code>U.copy_file_stream</code> 的 <code>res==false</code> 取消判定，导致取消信号在<b>默认复制路径</b>上被吞掉，仍会继续完成 .orig 固化与原书替换。四轮（5109fb6）的取消测试复写了 <code>copy_file</code> 直接返回取消三元组，未覆盖默认路径，故未捕获该缺陷。</div>
+          <div class="k">修复</div>
+          <div class="v"><code>sync.lua</code> 默认 <code>copy_file</code> 包装器内层回调改为 <code>return step("copy", done, total, "固化干净源")</code>，使取消布尔值正确透传至 <code>U.copy_file_stream</code> 的 <code>res==false</code> 判定；<code>Sync.run</code> 两个固化调用点原有 <code>copy_status=="cancelled"</code> 分支（中止 + .old 回滚）无需改动即生效。</div>
+          <div class="k">测试（新增 1 用例，共 20）</div>
+          <div class="v">
+            <ul>
+              <li>「默认复制路径：用户取消 → 中止且不替换原书」——不复写 <code>copy_file</code>（走 <code>Sync.run</code> 默认 <code>U.copy_file_stream</code>），仅用 <code>progress</code> 在 <code>copy</code> 阶段返回 <code>false</code> 触发取消，验证 <code>Sync.run</code> 中止、不执行最终 swap、并把 .old 回滚为 doc_path。临时回退修复验证该用例确能捕获回归（回退时 1 failing）。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 195 passed / 0 failed</span>（较四轮 194 新增 1 个默认路径取消用例）。</li>
+              <li>Diff 复核：仅 sync.lua（+5/−2）与 test_sync_clean_source.lua（+42），无泄漏无关改动；PR diff 不进 fork main 审计目录。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅修正默认复制路径的取消信号透传；显式传入 <code>deps.copy_file</code> 的调用方行为与既有取消测试均不受影响，向后兼容、无破坏性。</div>
+        </div>
+      </div>
+    </div>
 
 </div>
 
@@ -321,7 +349,7 @@
     <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
     <tbody>
       <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl</code> sync.lua / main.lua / sync_task.lua</td></tr>
-      <tr><td>测试套件</td><td class="ok">168 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 17 个新用例）</td></tr>
+      <tr><td>测试套件</td><td class="ok">195 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 20 个 clean_source 新用例 + 主线随行用例）</td></tr>
       <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
       <tr><td>设备数据动态验证</td><td class="ok">通过</td><td>《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（45 划线）：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code></td></tr>
       <tr><td>真机端到端验证</td><td class="ok">通过</td><td>KPW3 真机：干净原书 + 本地 sync-cache 离线重注成功；1617 份缓存 + 71,177 行想法无损还原；<code>crash.log</code> 无报错（结果已写入 PR #20 说明）</td></tr>
