@@ -177,6 +177,10 @@ function Sync.run(deps)
         local book_next = chapter_start
         -- 本书独立的待处理章节计数,最后并入聚合 chapters_pending 并记入 per_book。
         local book_pending = 0
+        -- 本章是否已被实际注入/保存(用于区分「失败前有无有效产出」)。
+        -- 失败且未贡献任何章节 → 单书致命 / 多书软失败;失败但已有贡献 → 部分提交。
+        local book_contributed = false
+        local book_failed, book_failed_index, book_failed_reason
         -- 本书批次起止(逐书记录,避免全局累加器被末本覆盖,P1#4)。
         local book_batch_start, book_batch_end
         while i <= #chapter_list do
@@ -213,14 +217,25 @@ function Sync.run(deps)
                 -- 断点缓存命中(resumed)不算网络成功,不能复位熔断计数:
                 -- 离线续传时散布的缓存命中会把计数清零,让熔断永不触发。
                 if not data.resumed then book_consecutive_hard = 0 end
-                if #(data.errors or {}) > 0 then partial_errors = partial_errors + 1 end
+                if #(data.errors or {}) > 0 then
+                    -- 章节拉取返回错误(想法批次等):本章视为失败,停在当前章、不注入、
+                    -- 计入拉取错误;已有成功章节则部分提交,否则依多书/单书决定软失败或致命
+                    -- (评审四轮 P1#3:失败章节不得进入注入与 .completed)。
+                    partial_errors = partial_errors + 1
+                    book_failed = true
+                    book_failed_index = i
+                    book_failed_reason = "划线拉取失败: " .. short_err(tostring((data.errors or {})[1] or "接口返回异常"))
+                    break
+                end
                 total_underlines = total_underlines + (data.underline_count or 0)
                 total_thought_entries = total_thought_entries + (data.thought_entry_count or 0)
+                local fetched_before = #fetched
                 if (data.underline_count or 0) > 0 then
                     fetched[#fetched + 1] = {
                         uid = ch.uid, title = ch.title, book_id = bid,
                         underlines = data.underlines, review_map = data.review_map,
                     }
+                    book_contributed = true
                 end
                 if #(data.review_groups or {}) > 0 then
                     local ok_save, saved = pcall(deps.save_thoughts, ch.book_id, ch.uid, data.review_groups)
@@ -231,6 +246,14 @@ function Sync.run(deps)
                         -- 统一复合键 book_id+UID,与 epub_inject 的 thoughts_linked_by_uid 对齐
                         -- (多书场景同 uid 不串键,成功/失败数量才准)。见评审二轮 P1#5。
                         thought_save_failed[ck(ch.book_id, ch.uid)] = true
+                        -- 想法缓存写入失败:停在当前章、回滚本迭代已加入的章节(整章重做)、
+                        -- 失败章不进注入、游标不动、剩余计入 pending(评审四轮 P1#3:失败章节
+                        -- 不得进入注入与 .completed)。
+                        while #fetched > fetched_before do fetched[#fetched] = nil end
+                        book_failed = true
+                        book_failed_index = i
+                        book_failed_reason = "想法缓存写入失败: " .. short_err(tostring(saved or err or "磁盘写入失败"))
+                        break
                     end
                 end
             else
@@ -241,24 +264,37 @@ function Sync.run(deps)
                 elseif type(data) == "table" then
                     last_error = tostring((data.errors or {})[1] or last_error or "接口返回异常")
                 end
-                -- 断网熔断:连续多章整章失败(每章重试要吃满超时)不能逐章磨完全书。
-                -- 最后一章失败时不熔断,让已取到的数据走完正常出口。
-                if book_consecutive_hard >= 3 and i < #chapter_list then
-                    if multi_book then
-                        -- 多书:本书熔断,记录完整续传状态(下一游标=失败章、待处理=剩余章、总量)
-                        -- 继续下一本,不让第一本拖垮整批(评审二轮 P1#2);failed 标记阻止
-                        -- sync_task 误写 .completed(评审三轮 P1#1),下次仍可从 i 续传(断点缓存命中)。
-                        local remaining = #chapter_list - i + 1
-                        per_book[bid] = {
-                            failed = true,
-                            error = string.format("连续 %d 章拉取失败,已中止本书同步", book_consecutive_hard),
-                            next_index = i, pending = remaining,
-                            total = #chapter_list, start = chapter_start,
-                        }
-                        return false, per_book[bid].error
+                -- 本书尚无任何章节产出时的首个硬失败(单书首章即失败 / 多书整本开头就断):
+                -- 单书直接致命中止,避免跨过连续游标磨完全书却一无所获;多书记失败态、继续下一本
+                -- (落回下方连续熔断,评审三轮 P1#1)。已有成功产出的硬失败:停在当前失败章、部分提交,
+                -- 失败章不进注入、游标不动、剩余计入 pending(评审四轮 P1#3)。
+                if not book_contributed then
+                    if not multi_book then
+                        -- 单书首章即失败:立即致命中止,报错带真实错误(评审四轮 P1#3)。
+                        return nil, string.format("划线拉取失败(共 %d 章)。\n最后错误:%s",
+                            hard_failures, short_err(last_error))
                     end
-                    return nil, string.format("连续 %d 章拉取失败,已中止同步。\n最后错误:%s",
-                        book_consecutive_hard, short_err(last_error))
+                    -- 多书无产出:落回下方连续熔断逻辑(连续 3 章才停),保持 P1#1 行为。
+                else
+                    book_failed = true
+                    book_failed_index = i
+                    book_failed_reason = "划线拉取失败: " .. short_err(last_error)
+                    break
+                end
+                -- 断网熔断:连续多章整章失败(每章重试要吃满超时)不能逐章磨完全书。
+                -- 仅多书无产出路径会走到这里(单书无产出已在上方面即中止;已有产出已在上方面即 break)。
+                if book_consecutive_hard >= 3 and i < #chapter_list then
+                    -- 多书:本书熔断,记录完整续传状态(下一游标=失败章、待处理=剩余章、总量)
+                    -- 继续下一本,不让第一本拖垮整批(评审二轮 P1#2);failed 标记阻止
+                    -- sync_task 误写 .completed(评审三轮 P1#1),下次仍可从 i 续传(断点缓存命中)。
+                    local remaining = #chapter_list - i + 1
+                    per_book[bid] = {
+                        failed = true,
+                        error = string.format("连续 %d 章拉取失败,已中止本书同步", book_consecutive_hard),
+                        next_index = i, pending = remaining,
+                        total = #chapter_list, start = chapter_start,
+                    }
+                    return false, per_book[bid].error
                 end
             end
             if not chapter_rate_limited and not skipped_completed_cache then
@@ -282,7 +318,12 @@ function Sync.run(deps)
             rate_limited = true
             rate_limit_wait = book_rate_limit_wait or rate_limit_wait
         end
-        if book_pending == 0 and book_next ~= nil and book_next <= #chapter_list then
+        if book_failed then
+            -- 失败章节:游标停在失败章,待处理=剩余章节(含失败章本身),失败章不进注入
+            -- (评审四轮 P1#3)。failed 标记阻止 sync_task 误写 .completed(评审三轮 P1#1)。
+            book_next = book_failed_index
+            book_pending = #chapter_list - book_failed_index + 1
+        elseif book_pending == 0 and book_next ~= nil and book_next <= #chapter_list then
             book_pending = book_pending + (#chapter_list - book_next + 1)
         end
         -- 记录本书续传游标,并并入聚合 chapters_pending / next_index(P1#5)。
@@ -293,6 +334,8 @@ function Sync.run(deps)
             start = chapter_start,
             batch_start = book_batch_start,
             batch_end = book_batch_end,
+            failed = book_failed or nil,
+            error = book_failed_reason,
         }
         chapters_pending = chapters_pending + book_pending
         next_index = book_next
@@ -310,15 +353,19 @@ function Sync.run(deps)
             failed_books[#failed_books + 1] = bid
         end
     end
-    -- 聚合批次起止:取各书 batch_start 最小 / batch_end 最大,避免末本覆盖整体范围(P1#4);
-    -- 逐书 range 已存入 per_book,报告与续传依据可同时展示聚合摘要与逐书明细。
+    -- 聚合批次起止:单书时 batch_start/end 即本书真实章节区间,直接取本书;
+    -- 多书时不同远程书的章节坐标是彼此独立的序列,不能拼成单一连续区间
+    -- (评审四轮 P1#4),故多书聚合不输出合并区间(置 nil),逐书真实 range 由
+    -- per_book[bid].batch_start/batch_end 承载,报告只展示聚合数量 + 逐书明细。
     batch_start_index = nil
     batch_end_index = nil
-    for _, bid in ipairs(book_ids) do
-        local pb = per_book[bid]
-        if pb and pb.batch_start then
-            batch_start_index = math.min(batch_start_index or pb.batch_start, pb.batch_start)
-            batch_end_index = math.max(batch_end_index or pb.batch_end, pb.batch_end)
+    if not multi_book then
+        for _, bid in ipairs(book_ids) do
+            local pb = per_book[bid]
+            if pb and pb.batch_start then
+                batch_start_index = math.min(batch_start_index or pb.batch_start, pb.batch_start)
+                batch_end_index = math.max(batch_end_index or pb.batch_end, pb.batch_end)
+            end
         end
     end
     -- 多书部分失败:若所有书都软失败且无任何章节数据,整体报错;

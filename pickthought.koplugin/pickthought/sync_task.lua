@@ -232,6 +232,24 @@ function SyncTask:_memory_available_kb()
     return parse_memory_available_kb(U.read_file("/proc/meminfo", true))
 end
 
+function SyncTask:_fork_memory_cooldown_remaining()
+    local until_at = tonumber(self.fork_memory_cooldown_until) or 0
+    local remaining = until_at - os.time()
+    if remaining <= 0 then
+        self.fork_memory_cooldown_until = nil
+        return 0
+    end
+    return remaining
+end
+
+function SyncTask:_mark_fork_memory_failure(message)
+    if not is_memory_error(message) then return false end
+    self.fork_memory_cooldown_until = os.time() + FORK_MEMORY_COOLDOWN_SECONDS
+    logger.warn("[撷思][SyncTask] fork memory cooldown",
+        "seconds=", tostring(FORK_MEMORY_COOLDOWN_SECONDS), "error=", tostring(message))
+    return true
+end
+
 function SyncTask:_enable_memory_mode()
     if self._memory_mode then return true end
     local ok, mode = pcall(function()
@@ -1002,7 +1020,7 @@ function SyncTask:start(task, on_progress, on_done)
             LoggerChild.warn("[撷思][SyncTask] child failed", raw_error)
             local display_error = raw_error:match("^(.-)\nstack traceback:") or raw_error
             display_error = display_error:gsub("^.-%.lua:%d+:%s*", "")
-            if raw_error:lower():find("not enough memory", 1, true) then
+            if is_memory_error(raw_error) then
                 display_error = "设备内存不足,同步未完成;原书与已有副本未受影响,已拉取章节保存在断点缓存。"
             end
             local was_cancelled = cancelled() or display_error == "已取消"
@@ -1023,7 +1041,9 @@ function SyncTask:start(task, on_progress, on_done)
     if not ok or not pid then
         os.remove(worker_settings_path)
         self:_release_memory_mode()
-        return false, tostring(err or pid or "无法启动同步子进程")
+        local launch_error = tostring(err or pid or "无法启动同步子进程")
+        self:_mark_fork_memory_failure(launch_error)
+        return false, launch_error
     end
 
     self.job = {

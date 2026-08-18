@@ -1060,9 +1060,10 @@ T.case("多书连续失败熔断:记录续传游标且不误标完成(P1#1)", fu
     T.ok(not report.per_book["b2"].failed, "b2 非失败书")
 end)
 
--- 评审三轮 P1#4:多书聚合批次范围(batch_start/end)须取各书 min/max,不能让末本覆盖
--- 整体范围。b1 处理 5 章、b2 处理 2 章 → 聚合 batch_end 应为 5(旧实现会被末本覆盖成 2)。
-T.case("多书聚合批次范围取各书 min/max(P1#4)", function()
+-- 评审四轮 P1#4:多书聚合报告不能把不同远程书的独立章节坐标拼成单一连续区间。
+-- 不同书各有自己的第 1..N 章,合并出的「1–5」区间在本地 EPUB 上并无意义。
+-- 因此多书聚合 batch_start/batch_end 应为 nil,真实逐书 range 由 per_book 承载。
+T.case("多书聚合不合并章节区间为单一范围(P1#4)", function()
     local deps = {
         doc_path = "/books/合集.epub",
         book_ids = {"b1", "b2"},
@@ -1098,10 +1099,56 @@ T.case("多书聚合批次范围取各书 min/max(P1#4)", function()
     }
     local report = Sync.run(deps)
     T.ok(report, "多书聚合应成功")
-    T.eq(report.batch_start, 1, "聚合 batch_start 取各书最小=1")
-    T.eq(report.batch_end, 5, "聚合 batch_end 取各书最大=5(非末本 2)")
-    T.eq(report.per_book["b1"].batch_start, 1, "b1 逐书 batch_start")
-    T.eq(report.per_book["b1"].batch_end, 5, "b1 逐书 batch_end")
-    T.eq(report.per_book["b2"].batch_start, 1, "b2 逐书 batch_start")
-    T.eq(report.per_book["b2"].batch_end, 2, "b2 逐书 batch_end")
+    T.eq(report.batch_start, nil, "多书聚合不输出合并区间(各书坐标独立)")
+    T.eq(report.batch_end, nil, "多书聚合不输出合并区间")
+    T.eq(report.per_book["b1"].batch_start, 1, "b1 逐书 batch_start 仍真实")
+    T.eq(report.per_book["b1"].batch_end, 5, "b1 逐书 batch_end 仍真实")
+    T.eq(report.per_book["b2"].batch_start, 1, "b2 逐书 batch_start 仍真实")
+    T.eq(report.per_book["b2"].batch_end, 2, "b2 逐书 batch_end 仍真实")
+end)
+
+-- 评审四轮 P1#4:两本书章节数差异很大时,聚合绝对不能报出「第 1–N 章」这种误导区间。
+-- b1 有 10 章、b2 只有 3 章,聚合若仍输出 1–10 会让用户误以为两书都拉到第 10 章。
+T.case("多书游标不同范围不连续时不报合并区间(P1#4)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                local rows = {}
+                for i = 1, 10 do
+                    rows[i] = {chapterUid=i, title="b1-"..i, chapterIdx=i}
+                end
+                return {data = rows}
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+                {chapterUid=3,title="b2-3",chapterIdx=3},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "多书聚合应成功")
+    T.eq(report.chapters_total, 13, "聚合章节总数=10+3")
+    T.eq(report.batch_start, nil, "绝不报「第 1–10 章」这种跨书合并区间")
+    T.eq(report.batch_end, nil, "绝不报合并区间")
+    T.eq(report.per_book["b1"].total, 10, "b1 真实总数")
+    T.eq(report.per_book["b1"].batch_end, 10, "b1 逐书 batch_end=10")
+    T.eq(report.per_book["b2"].total, 3, "b2 真实总数")
+    T.eq(report.per_book["b2"].batch_end, 3, "b2 逐书 batch_end=3")
 end)

@@ -220,10 +220,9 @@ function Plugin:book_actions(path)
                 label=label..string.format("（%d 本）",agg.books_with_pending)
             end
             rows[#rows+1]={{text=label,
-        end
-        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
+        rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
     end
     if self:_has_reinject_cache(path) then
         rows[#rows+1]={{text="重新注入(用上次数据,离线)",callback=act(function() self:sync_entry(path,"reinject") end)}}
@@ -820,11 +819,17 @@ end
 function Plugin:_has_reinject_cache(path)
     local bound=path and Binding.get(self.store,path)
     if not bound then return false end
-    -- 多书绑定:任何一本书有缓存即可离线重注(分批未完也算)。
-    for _, bid in ipairs(self:_book_ids(path)) do
-        if U.file_exists(self.store:book_cache_path(bid).."/sync-cache/chapters.json") then return true end
+    local ids=self:_book_ids(path)
+    if #ids==0 then return false end
+    -- 离线重注要求后台重注时每本绑定书都有 chapters.json(评审四轮 P1#5):
+    -- 多书场景下若有书尚未同步(无缓存),后台重注必然失败;只有全部绑定书
+    -- 缓存齐全才提供入口,避免给出「必然失败的离线重注入口」。
+    for _, bid in ipairs(ids) do
+        if not U.file_exists(self.store:book_cache_path(bid).."/sync-cache/chapters.json") then
+            return false
+        end
     end
-    return false
+    return true
 end
 
 -- 读同步进度状态(child 写的 state.json);60s 内存缓存,翻页检查零成本。
@@ -1028,6 +1033,11 @@ function Plugin:_maybe_auto_batch(page)
     if not path or not tostring(path):lower():match("%.epub$") then return end
     local bound=Binding.get(self.store,path)
     if not bound then return end
+    -- 捕获当前阅读上下文,供下方 _resolve_sync_context 校验「仍是同一本书」;
+    -- 此前该函数引用了未定义的 operation_context(=nil),onPageUpdate 的 pcall 会把
+    -- 自动/确认同步的启动错误吞掉,表现为静默失效(评审四轮 P1#2)。切书后该上下文
+    -- 不再匹配当前文档,resolve 返回 nil 触发过期提示。
+    local operation_context=self:_capture_sync_context(path,bound)
     -- 多书聚合坐标与本地 EPUB 物理章节无可靠偏移映射,基于聚合 next_index/pending
     -- 的自动触发会误拉/漏拉(评审三轮 P1#3);多书场景暂禁用自动触发,用户仍可
     -- 手动「继续拉取」(走每本书各自的 state.json 续传)。
