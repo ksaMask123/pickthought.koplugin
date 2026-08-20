@@ -384,7 +384,8 @@
             </ul>
           </div>
           <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>205</b> 通过 / <b>0</b> 失败</span>（较四轮 191 新增 6 用例 + 上游 v0.3.3 新增 8 测试）。提交 <code>470b29a</code> 并 push 至 fork <code>feature/multi-book</code>。
-          <div class="k">rebase（2026-08-20 同日）</div><div class="v">上游 main 前进至 v0.3.3（<code>28ce676</code>，含异步保活 / 调试模式 / 样式修复 5 提交）后 PR 一度 CONFLICTING；已用 cherry-pick 重基（<code>23ac394</code> = 多书内容合并结果重放、<code>09949a3</code> = 四轮、<code>ed2a12b</code> = 五轮，tip 基于最新 main），解决 <code>sync_task.lua</code> / <code>test_epub_inject.lua</code> 冲突：保留上游异步保活 / 调试诊断 / 内存冷却，并把上游失败态落盘移植为多书版（全部绑定书写失败态，单书等价）。重基后全量 205 passed / 0 failed，<code>mergeable=clean</code>。</div></div>
+          <div class="k">rebase（2026-08-20 同日）</div><div class="v">上游 main 前进至 v0.3.3（<code>28ce676</code>，含异步保活 / 调试模式 / 样式修复 5 提交）后 PR 一度 CONFLICTING；已用 cherry-pick 重基（<code>23ac394</code> = 多书内容合并结果重放、<code>09949a3</code> = 四轮、<code>ed2a12b</code> = 五轮，tip 基于最新 main），解决 <code>sync_task.lua</code> / <code>test_epub_inject.lua</code> 冲突：保留上游异步保活 / 调试诊断 / 内存冷却，并把上游失败态落盘移植为多书版（全部绑定书写失败态，单书等价）。重基后全量 205 passed / 0 failed。
+          <div class="k">CI 回归修复（提交 a6ede47）</div><div class="v">重基后 CI（<code>quality / verify</code>）检出 <code>test_menu_contract.py</code> 两处菜单契约回归：阅读器菜单「划线样式」入口仍是旧内联写法（上游 v0.3.3 已重构为 <code>annotation_style_item()</code> 助手）、<code>book_actions</code> 缺失样式入口。已改用上游助手/回调补齐，契约 18/18 通过，Lua 205/0。CI 对 head <code>a6ede47</code> 通过（actions/runs/32361827668），PR <code>mergeable_state=clean</code>。</div></div></div>
         </div>
       </div>
     </div>
