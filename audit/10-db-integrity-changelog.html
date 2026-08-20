@@ -35,9 +35,9 @@
     <div>日期</div><div>2026-08-19</div>
     <div>PR</div><div><a href="https://github.com/Mr54233/pickthought.koplugin/pull/15">#15 DB 完整性校验与 WAL 折叠</a></div>
     <div>上游 base</div><div><code>upstream/main</code> <code>38c352c</code></div>
-    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>5f57dd9</code></div>
+    <div>本分支 head</div><div><code>pr/db-integrity</code> <code>3bef4aa</code></div>
     <div>作者评审</div><div><span class="pill b">CHANGES_REQUESTED</span> → 第4轮意见已落实（5f57dd9），待作者 flip</div>
-    <div>单测</div><div><span class="ok">全量 203 passed / 0 failed</span>（含 DB 完整性 28/0；本地 LuaJIT 校验绿）</div>
+    <div>单测</div><div><span class="ok">全量 204 passed / 0 failed</span>（含 DB 完整性 29/0；本地 LuaJIT 校验绿）</div>
     <div>设备部署</div><div><span class="warn">未部署</span>（待授权；本 PR 仅改 <code>thought_db.lua</code>，属 SQLite 层，部署风险低）</div>
   </div>
 
@@ -182,9 +182,22 @@
     <b>影响范围</b>：仅 <code>thought_db.lua</code> 隔离 / 目标预留 / 存在性判定与测试；未引入破坏性变更，向后兼容。
   </div>
 
+  <h2>十一、2026-08-20 第5轮复审（提交 3bef4aa，ffi.os 启用原子路径 + cdef + 原子分支测试）</h2>
+  <div class="box">
+    <b>动机</b>：作者在 2026-08-19T14:07:18Z 的第5轮意见指出，第4轮虽改成"原子无覆盖预留"，但原子路径在 Kindle Linux 上实际从未启用，且测试未真正覆盖原子分支。本提交逐条修复。<br>
+    <b>具体改动（仅 thought_db.lua + 测试）</b>：
+    <ul>
+      <li><b>系统判断修正（意见①）</b>：原 <code>ffi.abi("os") == "Linux"</code> 中 <code>ffi.abi()</code> 返回<b>布尔值</b>而非字符串，导致条件恒为假，Kindle Linux 永远走 <code>probe + os.rename</code> 降级路径，上一轮要求消除的 TOCTOU 竞态实际仍存在。改为 <code>ffi.os == "Linux"</code>（LuaJIT 正确的系统判断方式：<code>ffi.os</code> 为 <code>"Linux"/"Windows"/"OSX"</code> 字符串），确保 Kindle Linux 真实进入 <code>O_CREAT | O_EXCL</code> 原子预留路径。</li>
+      <li><b>C 函数声明（意见②）</b>：新增 <code>ffi.cdef</code> 声明 <code>open/close</code>，避免 Kindle Linux 加载期报 <code>missing declaration for symbol 'open'</code>；<code>cdef</code> 冲突时退化为 <code>nil</code>（走降级路径），不阻断模块加载。</li>
+      <li><b>原子分支测试（意见③）</b>：<code>tests/test_thought_db_integrity.lua</code> 新增用例——注入 fake <code>ffi</code>（<code>os="Linux"</code> + <code>C.open/C.close</code> 模拟原子占用）强制走原子分支，验证：目标被占用（已存在 <code>.corrupt-*</code>）时换新名、旧备份内容原样保留、新目标承载主库内容；并通过 <code>atomic_calls</code> 计数断言原子分支（<code>ffi.C.open</code>）确实被走到，而非降级 probe 路径（避免 CI 假绿）。</li>
+    </ul>
+    <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">204 passed / 0 failed</span>（含 DB 完整性 29/0）。<br>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code> 原子预留的系统判断与 FFI 声明；向后兼容，非 Linux / 无 ffi 仍走降级路径。
   </div>
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>5f57dd9</code>。</p>
+  </div>
+
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>3bef4aa</code>。</p>
 </div>
 </body>
 </html>
