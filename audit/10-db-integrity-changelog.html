@@ -195,9 +195,22 @@
     <b>影响范围</b>：仅 <code>thought_db.lua</code> 原子预留的系统判断与 FFI 声明；向后兼容，非 Linux / 无 ffi 仍走降级路径。
   </div>
 
-  </div>
+  
+  <h2>十二、2026-08-20 晚 第6轮复审（提交 ebe5e96，errno 区分 + 占位 fd 生命周期 + 退化路径 uncheckable）</h2>
+  <p>作者（Mr54233）在 2026-08-20T11:46:26Z 的第6轮意见指出原子隔离的 4 个极端文件系统边界，全部落实：</p>
+  <ul>
+    <li><b>① errno 区分（意见①）</b>：<code>atomic_claim()</code> 读取 <code>ffi.errno()</code>——仅 <code>errno==EEXIST(17)</code> 视为目标已存在、换名重试；权限不足/磁盘耗尽/IO 等其他错误立即返回，<code>reserve_corrupt_main</code> 遇非 EEXIST 直接中止（不再盲目循环 100000 次阻塞 Kindle）；<code>.isolated</code> 标记已先行写入，保留阻断自动建库。</li>
+    <li><b>② 占位 fd 生命周期（意见②）</b>：<code>atomic_claim</code> 成功返回保持打开的 fd，<code>reserve</code> 在 <code>os.rename</code> 完成（或失败）后才关闭；<code>rename</code> 失败清理占位时仅删除本流程创建的 0 字节空占位，若已被其他进程替换成有内容文件则不动，避免误删他人数据。</li>
+    <li><b>③ 测试真实化（意见③）</b>：fake ffi 完整模拟 <code>O_CREAT|O_EXCL</code> 占位语义、errno 注入（支持通配）与 fd 生命周期——<code>close</code> 时检查目标已承载主库内容，证明 fd 保持到 <code>rename</code> 完成后才关闭；新增 EACCES 立即中止用例（<code>open</code> 只调 1 次、标记保留、主库未动）。</li>
+    <li><b>④ lfs 显式加载（意见④）</b>：<code>path_exists_distinct()</code> 显式 <code>pcall(require,"libs/libkoreader-lfs")</code> 而非只查 <code>package.loaded</code>；lfs 不可用时退化 <code>io.open</code> 也据 err 文本区分「不存在」与「权限/IO 错误」（后者 → <code>uncheckable</code> → 阻断自动建库），新增无 lfs 退化路径权限错误用例。</li>
+  </ul>
+  <b>rebase 到最新 main（v0.3.3 + 性能模式 435971b）</b>：cherry-pick 重放 9 个提交（<code>237a32d</code> 三轮收尾、<code>c1ad727</code> 五轮、<code>ebe5e96</code> 六轮等），零冲突；上游 #17 性能模式合入后新增 23 个测试随行。<br>
+  <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">229 passed / 0 failed</span>（含 DB 完整性 31/0）；CI <code>quality / verify</code> 对 head <code>ebe5e96</code> 运行中。<br>
+  <b>影响范围</b>：仅 <code>thought_db.lua</code> 原子隔离的错误码区分 / fd 生命周期 / 存在性判断；向后兼容，非 Linux / 无 ffi 仍走降级路径。
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>3bef4aa</code>。</p>
+</div>
+
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>ebe5e96</code>（rebase 至 435971b，全量 229 passed / 0 failed）。</p>
 </div>
 </body>
 </html>
