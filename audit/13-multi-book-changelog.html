@@ -55,7 +55,7 @@
 
   <p style="color:var(--muted);font-size:13.5px">
     本日志按时间线记录 PR #13（多书绑定）历次修改，含修改日期、动机、具体改动点、影响范围与校验结果。
-    已落地的评审轮次：<strong>第二轮 7 项</strong>（P1#1–P1#5、P2#6、P2#7）、<strong>第三轮 4 项 P1 + 收尾</strong>（失败书误标完成、离线重建登录拦截、聚合坐标误触发自动批、报告范围末本覆盖，及 data.data 旧字段兼容）、<strong>第四轮 P0 + P1#2/#3/#4/#5</strong>（内存冷却回归、失败章节推进游标、多书聚合范围、自动同步上下文、离线重注入口，并修复 book_actions 语法损坏），并完成基于最新 main 的 rebase 解冲突。
+    已落地的评审轮次：<strong>第二轮 7 项</strong>（P1#1–P1#5、P2#6、P2#7）、<strong>第三轮 4 项 P1 + 收尾</strong>（失败书误标完成、离线重建登录拦截、聚合坐标误触发自动批、报告范围末本覆盖，及 data.data 旧字段兼容）、<strong>第四轮 P0 + P1#2/#3/#4/#5</strong>（内存冷却回归、失败章节推进游标、多书聚合范围、自动同步上下文、离线重注入口，并修复 book_actions 语法损坏），、<strong>第五轮 2 项 P1</strong>（多书不推导伪范围、失败书状态不被聚合当已完成），并完成基于最新 main 的 rebase 解冲突。
   </p>
 
   <div class="timeline">
@@ -358,15 +358,41 @@
               <li><strong>额外：book_actions 语法损坏</strong>：<code>562687a</code> 的 rebase 合并在 <code>book_actions</code> 留下结构错乱（未闭合按钮 + 孤儿 <code>callback</code> + 多余 <code>end</code>），会导致插件<strong>无法加载</strong>；CI 因不加载 <code>main.lua</code> 未能捕获，已修复并 <code>loadfile</code> 复校通过。</li>
             </ul>
           </div>
-          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>191</b> 通过 / <b>0</b> 失败</span>（新增 / 调整 P1#3×5、P1#4×2）。提交 <code>1e1dc12</code> 并 push 至 fork <code>feature/multi-book</code>。PR 描述同步更新（183/7 → 191/0）。</div>
+          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>197</b> 通过 / <b>0</b> 失败</span>（新增 / 调整 P1#3×5、P1#4×2）。提交 <code>1e1dc12</code> 并 push 至 fork <code>feature/multi-book</code>。PR 描述同步更新（183/7 → 191/0）。</div>
         </div>
       </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-20（评审五轮 · 多书展示范围与失败状态聚合）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-19 第5轮意见（提交 470b29a）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-19（T14:45:19Z）指出两处边界：<b>①</b> 多书继续同步弹窗与完成报告仍按聚合 total/pending/next_index 推导单一章节范围——两本远程书各自同步了不同范围时，界面可能显示「从第 1 章拉取到第 7 章」，但该范围不属于任何一本书（sync.lua 虽已把聚合 batch_start/end 置空，展示层仍自造伪范围）；<b>②</b> 三个失败边界状态不一致——章节列表为空直接返回成功（任务层按空状态写 .completed 误标完成）、章节列表请求失败 pending=nil 被聚合当 0 处理（「继续拉取」入口消失）、连续失败熔断的失败书 pending 未计入聚合 chapters_pending（完成报告同时显示「全书已处理完成」与「某本书同步失败」）。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><strong>多书不推导伪范围</strong>：<code>batch_sync.lua</code> 的 <code>M.plan</code> 增加多书分支（<code>multi_book=true</code> 时不推导 start/end，只返回聚合数量 + 逐书明细），<code>prompt_text</code> / <code>background_text</code> 多书分支只展示「剩余共 N 章（跨 M 本书）」+ 逐书行（各自 range / pending / next_index / 失败原因），绝不生成跨书区间；<code>main.lua</code> 已同步缓存弹窗多书时改为「多书聚合：已处理 X 章，还剩 Y 章」+ 失败/未知书提示；<code>sync_report.lua</code> 多书报告不输出「拉取范围 / 注入进度到第 X 章 / 下一批第 a–b 章」，只展示聚合数量，逐书真实位置见「逐书明细」。</li>
+              <li><strong>失败书状态不丢失</strong>：<code>sync.lua</code> 多书章节列表为空不再当「成功」返回（改记 per_book 失败态，pending=nil = 剩余未知）；熔断失败书已知 pending 计入聚合 chapters_pending。<code>sync_task.lua</code> state.json 落盘保留 failed / error，且 pending=nil 不再落 0（序列化省略该键，阅读端聚合按「未知」处理）；仅「无失败标记且 pending==0」写 .completed。<code>main.lua</code> <code>_aggregate_sync_state</code> 增加 books_failed / books_unknown 计数，pending=nil 不当作 0；「继续拉取」菜单条件与标签覆盖失败/未知书（如「N 本失败」「N 本剩余未知」），失败书不因聚合消失。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 6 用例）</div>
+          <div class="v">
+            <ul>
+              <li>test_sync.lua：多书章节列表为空 → per_book 失败态且不生成 .completed 语义；多书全部失败 → 整体报错并列出各书原因；失败后再次同步 → 重试失败书成功；熔断用例补断言 <code>chapters_pending</code> 含失败书剩余章。</li>
+              <li>test_batch_sync.lua：多书 plan 无跨书伪范围（prompt_text 只报聚合 + 逐书）；失败书/未知书在逐书明细可见。</li>
+              <li>test_sync_report.lua：多书报告不输出「拉取范围/下一批第 a–b 章」，只展示聚合数量 + 逐书明细。</li>
+            </ul>
+          </div>
+          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>197</b> 通过 / <b>0</b> 失败</span>（较四轮 191 新增 6 用例）。提交 <code>470b29a</code> 并 push 至 fork <code>feature/multi-book</code>。</div>
+        </div>
+      </div>
+    </div>
     </div>
 
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>191 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>197 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
