@@ -83,3 +83,27 @@ T.case("多书报告不生成跨书伪范围", function()
     T.ok(text:find("· b2：同步失败（断网）", 1, true), "失败书明细保留: " .. text)
     T.ok(text:find("· b1：已处理 5/8 章，还剩 3 章（续传第 4 章）", 1, true), "正常书明细: " .. text)
 end)
+
+
+-- 评审六轮 P1#2(2026-08-20):多书部分失败时,报告不得显示「全部章节已处理完成」——
+-- 必须明确列出失败书/剩余未知书,与逐书明细保持一致。
+T.case("多书报告:一书成功、一书章节列表失败 → 不显示全部完成", function()
+    local text = render{
+        multi_book = true,
+        chapters_total = 8, chapters_pending = 0, chapters_processed = 3,
+        chapters_fetch_succeeded = 3, total_underlines = 10,
+        total_thought_entries = 0, underlines_injected = 10, thoughts_injected = 0,
+        batch_start = nil, batch_end = nil, next_index = 4, batch_limit = 200,
+        failed_books = {"b2"},
+        per_book = {
+            b1 = {total = 8, pending = 0, next_index = 9},
+            b2 = {total = 0, pending = nil, failed = true, error = "获取章节列表失败:网络超时"},
+        },
+        unmatched = {}, fetch_errors = 0, save_failures = 0,
+        backup = "book.epub.orig",
+    }
+    T.ok(not text:find("全部章节已处理完成", 1, true), "存在失败书不得显示全部完成: " .. text)
+    T.ok(text:find("有书同步失败/剩余未知：b2", 1, true), "明确列出失败书: " .. text)
+    T.ok(text:find("· b2：同步失败（获取章节列表失败:网络超时）", 1, true), "逐书明细保留失败原因: " .. text)
+    T.ok(text:find("· b1：8/8 章已完成", 1, true), "成功书明细正常: " .. text)
+end)

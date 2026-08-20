@@ -230,8 +230,6 @@ function Plugin:book_actions(path)
         local n=#Binding.list(self.store,path)
         rows[#rows+1]={{text=string.format("管理已绑定书目(%d)",n),callback=act(function() self:manage_bindings(path) end)}}
     end
-    rows[#rows+1]={{text=bound and "重新绑定微信读书" or "绑定微信读书",
-        callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="取消",callback=function() UIManager:close(dialog) end}}
     local title=self:doc_title_guess(path)
     if bound then

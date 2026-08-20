@@ -775,10 +775,12 @@ function SyncTask:start(task, on_progress, on_done)
                 if cs > 1 or completed_markers[bid] then resume_any = true end
                 if not completed_markers[bid] then all_completed = false end
             end
+            -- 限速等待按书隔离(评审六轮 P2#3):只有实际触发限速(带 retry_after)的书
+            -- 才等待,且等所有限速书各自过期(max);未限速书无 retry_after,不受影响。
             local retry_after
             for _, bid in ipairs(book_ids) do
                 local ra = tonumber((previous_states[bid] or {}).retry_after)
-                if ra then retry_after = retry_after and math.min(retry_after, ra) or ra end
+                if ra then retry_after = math.max(retry_after or 0, ra) end
             end
             if retry_after and retry_after > os.time() then
                 FFIUtil.usleep((retry_after - os.time()) * 1000000)
@@ -973,6 +975,10 @@ function SyncTask:start(task, on_progress, on_done)
                         LoggerChild.warn("[撷思][SyncTask] failure state save failed",
                             "book=", tostring(bid))
                     end
+                    -- 本次失败/取消:必须清除旧 .completed,否则下次同步因旧完成标记
+                    -- 开启 skip_resumed,把本次已拉取未注入的缓存跳过(评审六轮 P1#1)。
+                    local marker = cache_for(bid) .. "/.completed"
+                    if UChild.file_exists(marker) then pcall(os.remove, marker) end
                 end
                 error(sync_err or "同步失败")
             end
@@ -988,6 +994,9 @@ function SyncTask:start(task, on_progress, on_done)
                     -- pending=nil(章节列表失败/为空)= 剩余未知:不落 0,序列化省略该键,
                     -- 阅读端聚合时按「未知」处理,不得隐式当 0 吞掉失败书(评审五轮 P1#2)。
                     local pending = tonumber(pb.pending)
+                    -- 限速等待按书隔离(评审六轮 P2#3):retry_after 只写入实际触发限速的书,
+                    -- 下一轮不再让未限速的书一起等待。
+                    local rate_limit_wait = tonumber(pb.rate_limit_wait)
                     local state_data = {
                         total = tonumber(pb.total) or tonumber(report.chapters_total) or 0,
                         pending = pending,
@@ -995,7 +1004,7 @@ function SyncTask:start(task, on_progress, on_done)
                         -- 失败书状态与原因落盘:主界面聚合据此保留失败态并显示原因与续传位。
                         failed = pb.failed or nil,
                         error = pb.failed and tostring(pb.error or "同步失败") or nil,
-                        retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
+                        retry_after = rate_limit_wait and (os.time() + rate_limit_wait) or nil,
                         updated_at = os.time(),
                     }
                     local state_ok, state_json = pcall(JsonChild.encode, state_data)
@@ -1005,6 +1014,13 @@ function SyncTask:start(task, on_progress, on_done)
                     -- 被当成已完成、下次无法续传(评审三轮 P1#1)。分批未完/取消/失败不打标记=续传。
                     if (not pb.failed) and pending == 0 then
                         UChild.atomic_write(cache_for(bid) .. "/.completed", tostring(os.time()), true)
+                    else
+                        -- 本次没有明确完成(失败/取消/剩余未知/还有待处理):必须清除旧的
+                        -- .completed 标记,否则下次同步仍会因旧完成标记开启 skip_resumed,
+                        -- 把本次已拉取但尚未注入的章节缓存当成已处理内容跳过,新章节一直
+                        -- 进不了 EPUB(评审六轮 P1#1)。
+                        local marker = cache_for(bid) .. "/.completed"
+                        if UChild.file_exists(marker) then pcall(os.remove, marker) end
                     end
                 end
             end

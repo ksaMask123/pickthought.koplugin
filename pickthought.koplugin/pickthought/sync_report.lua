@@ -94,6 +94,14 @@ function M.build(report, options)
         lines[#lines + 1] = options.auto_batch == false
             and "菜单「继续拉取后续章节」手动拉，或阅读到边界时按提示后台补"
             or "菜单「继续拉取后续章节」手动拉，或继续阅读时自动补"
+    elseif report.failed_books and #report.failed_books > 0 then
+        -- 存在失败书/剩余未知书:不得显示「全部章节已处理完成」(评审六轮 P1#2)——否则
+        -- 与逐书明细里「某本书同步失败」前后矛盾。明确列出失败书。
+        local f = {}
+        for _, bid in ipairs(report.failed_books) do
+            f[#f + 1] = tostring(bid)
+        end
+        lines[#lines + 1] = "有书同步失败/剩余未知：" .. table.concat(f, "、")
     else
         lines[#lines + 1] = "全部章节已处理完成"
     end

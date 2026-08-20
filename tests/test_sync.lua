@@ -1269,3 +1269,30 @@ T.case("多书章节列表失败后再次同步:重试失败书成功(P1#2)", fu
     T.ok(not r2.per_book["b1"].failed, "重试后 b1 无失败标记")
     T.eq(r2.per_book["b2"].pending, 0, "b2 保持完成")
 end)
+
+
+-- 评审六轮 P1#1(2026-08-20):未明确完成(.completed 已清除)时,已缓存章节必须重新注入,
+-- 不能因旧完成标记开启 skip_resumed 而把"上次已拉取但尚未注入"的新缓存跳过。
+-- 本用例与「已完成缓存续同步跳过旧章」互为对照:skip_resumed=false 时 resumed 缓存
+-- 也进入注入(幂等重注入),保证上次中断未进 EPUB 的章节被补上。
+T.case("缓存续同步:未明确完成(skip_resumed=false)时缓存章节重新注入", function()
+    local rows = {}
+    for i = 1, 5 do rows[i] = {chapterUid = i, title = "第" .. i .. "章", chapterIdx = i} end
+    local deps, calls = make_deps({
+        api = {chapters = function() return {chapters = rows} end},
+        annotations = {
+            fetch_chapter = function(_, _, uid)
+                return {underlines = {{range = "0-7", markText = "春江潮水连海平"}},
+                    review_map = {}, review_groups = {}, resumed = true,
+                    underline_count = 1, thought_count = 0, thought_entry_count = 0, errors = {}}
+            end,
+        },
+        skip_resumed = false,  -- 未明确完成:不清跳过语义
+        fetch_budget = 5,
+    })
+    local report, err = Sync.run(deps)
+    T.ok(report, "应成功: " .. tostring(err))
+    T.eq(report.chapters_pending, 0, "无剩余")
+    -- 关键:缓存章节全部重新注入(不因 resumed 而跳过),上次未注入的缓存被补上。
+    T.ok(#calls.injected.mapped >= 5, "5 章缓存全部重新注入,而非被跳过")
+end)

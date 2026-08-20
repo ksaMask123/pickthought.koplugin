@@ -340,6 +340,9 @@ function Sync.run(deps)
             batch_end = book_batch_end,
             failed = book_failed or nil,
             error = book_failed_reason,
+            -- 限速等待按书隔离(评审六轮 P2#3):只有实际触发限速的书带 retry_after,
+            -- 下一轮不再让未限速的书一起等待。
+            rate_limit_wait = book_rate_limited and book_rate_limit_wait or nil,
         }
         chapters_pending = chapters_pending + book_pending
         next_index = book_next
@@ -397,6 +400,8 @@ function Sync.run(deps)
         report.batch_limit = chapter_budget or fetch_budget or chapters_total_all
         -- 多书标志:报告/弹窗层据此不推导单一连续章节范围(评审五轮 P1#1)。
         report.multi_book = multi_book or nil
+        -- 失败书列表:报告层据此不得显示「全部章节已处理完成」(评审六轮 P1#2)。
+        report.failed_books = #failed_books > 0 and failed_books or nil
         -- 按书续传游标,供调用方逐书写 state.json / .completed(P1#5)。
         report.per_book = per_book
         return report
