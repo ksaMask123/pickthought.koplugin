@@ -1,5 +1,6 @@
 local EpubInject = require("pickthought.epub_inject")
 local Json = require("pickthought.json")
+local PerformanceMode = require("pickthought.performance_mode")
 
 local CONTAINER = [[<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
 <rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>]]

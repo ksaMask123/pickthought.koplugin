@@ -95,10 +95,12 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     captured.inject_called = false
     captured.perf = nil
 
-    -- 最小 Plugin 环境:_sync_run 只用 self.api / self.store / _sync_fail / _sync_report。
+    -- 最小 Plugin 环境:_sync_run 只用 self.api / self.store / _book_ids / _sync_fail / _sync_report。
     local self = {}
     function self:_sync_fail(msg) self.fail_msg = msg end
     function self:_sync_report(r) self.report = r end
+    -- 多书版 _sync_run 经 _book_ids 取绑定书列表(评审 P1#1 接线)。
+    self._book_ids = function() return { "b001" } end
     self.api = { chapters = function()
         return { data = { { chapterUid = 1, title = "第一章", chapterIdx = 1 } } }
     end }
