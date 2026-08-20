@@ -383,7 +383,8 @@
               <li>test_sync_report.lua：多书报告不输出「拉取范围/下一批第 a–b 章」，只展示聚合数量 + 逐书明细。</li>
             </ul>
           </div>
-          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>197</b> 通过 / <b>0</b> 失败</span>（较四轮 191 新增 6 用例）。提交 <code>470b29a</code> 并 push 至 fork <code>feature/multi-book</code>。</div>
+          <div class="k">校验</div><div class="v">全量 LuaJIT 语法校验 ALL_OK；测试 <span class="stat"><b>205</b> 通过 / <b>0</b> 失败</span>（较四轮 191 新增 6 用例 + 上游 v0.3.3 新增 8 测试）。提交 <code>470b29a</code> 并 push 至 fork <code>feature/multi-book</code>。
+          <div class="k">rebase（2026-08-20 同日）</div><div class="v">上游 main 前进至 v0.3.3（<code>28ce676</code>，含异步保活 / 调试模式 / 样式修复 5 提交）后 PR 一度 CONFLICTING；已用 cherry-pick 重基（<code>23ac394</code> = 多书内容合并结果重放、<code>09949a3</code> = 四轮、<code>ed2a12b</code> = 五轮，tip 基于最新 main），解决 <code>sync_task.lua</code> / <code>test_epub_inject.lua</code> 冲突：保留上游异步保活 / 调试诊断 / 内存冷却，并把上游失败态落盘移植为多书版（全部绑定书写失败态，单书等价）。重基后全量 205 passed / 0 failed，<code>mergeable=clean</code>。</div></div>
         </div>
       </div>
     </div>
@@ -392,7 +393,7 @@
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>197 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>205 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
