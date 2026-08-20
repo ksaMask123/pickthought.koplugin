@@ -50,7 +50,7 @@
     <div class="kv">
       <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
       <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (a8c2e1f, v0.3.2) · 已 rebase 最新 main 并解决冲突（保留主线 test_sync_state / test_sync_gate / test_thought_popup / test_updater 测试）</div>
-      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希） · <code>3d74d61</code> fix(clean-source): 默认 copy_file 包装 return step() 让取消传播 + 默认路径取消测试 · <code>9708ca2</code> fix(clean-source): 作者第6轮复审 — .orig.old 失败恢复 + 遗留 .old 中断恢复</div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希） · <code>3d74d61</code> fix(clean-source): 默认 copy_file 包装 return step() 让取消传播 + 默认路径取消测试 · <code>9708ca2</code> fix(clean-source): 作者第6轮复审 — .orig.old 失败恢复 + 遗留 .old 中断恢复 · <code>966966a</code> fix(clean-source): 作者第7轮复审 — 恢复解析校验 + 主书暂存失败回滚 + 清理检查</div>
       <div class="k">改动文件</div><div class="v">9 个：<code>sync.lua</code> (+221)、<code>main.lua</code> (+46)、<code>binding.lua</code> (+11，新增 <code>offer_reinject</code> 纯判定)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+110，流式复制+内容指纹+路径哈希)、<code>tests/run.lua</code> (+1)、<code>tests/test_binding.lua</code> (+11)、<code>tests/test_sync.lua</code> (+4)、<code>tests/test_sync_clean_source.lua</code> (+509，共 19 用例)</div>
       <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 198/0</span><span class="badge b-acc">含 19 个 clean_source 用例</span><span class="badge b-acc">rebase 最新 main 后 24 个主线新增用例随行</span><span class="badge b-good">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
     </div>
@@ -365,6 +365,43 @@
         </div>
       </div>
     </div>
+
+    <div class="tl-item">
+      <div class="tl-date">2026-08-20 晚（评审七轮 · 恢复解析校验/主书暂存回滚/清理检查）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-20 第7轮意见（提交 966966a）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-20（T12:17:59Z）指出 clean_source 还有三处失败恢复边界：<b>①</b> 中断残留恢复 <code>.old -&gt; doc_path</code> 后未校验解析结果——若副本损坏会被当干净书继续，成功后会清掉最后一份可恢复文件；<b>②</b> 干净书重建时旧 <code>.orig -&gt; .orig.old</code>、复制 <code>clean_source</code> 成功后，若 <code>doc_path -&gt; .old</code> 主书暂存失败，<code>.orig</code> 已换新而主书仍是旧版本，后续重注使用不匹配备份；<b>③</b> 成功收尾清理 <code>.old/.orig.old</code> 的结果被 <code>pcall</code> 静默忽略，残留的 <code>.orig.old</code> 可能被后续误当有效旧备份恢复。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li>中断残留恢复后立即重新解析并校验（意见①）：恢复出的副本 <code>load_meta</code> 失败时中止后续流程并保留恢复出的文件，绝不把损坏副本当干净书继续。</li>
+              <li>主书暂存失败完整回滚（意见②）：<code>doc_path -&gt; .old</code> 失败时调用 <code>restore_backup_old()</code>——内部先移除新副本再恢复旧 <code>.orig</code>（<code>.orig.old -&gt; .orig</code>），返回失败后文件状态与操作前一致。</li>
+              <li>成功收尾清理检查（意见③）：<code>.old/.orig.old</code> 清理不再 <code>pcall</code> 静默忽略，失败时 <code>logger.warn</code> 记录 + 报告附 <code>cleanup_warnings</code> 字段，<code>sync_report</code> 明确展示。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 3 用例）</div>
+          <div class="v">
+            <ul>
+              <li>「中断残留恢复出的副本损坏 -&gt; 中止并保留文件」（恢复已发生、不删除副本、未触发固化）。</li>
+              <li>「复制成功但主书暂存失败 -&gt; 完整回滚」（新副本被清理、旧 <code>.orig</code> 恢复、主书未移动）。</li>
+              <li>「成功收尾暂存清理失败 -&gt; 报告带清理警告」（<code>cleanup_warnings</code> 出现在报告文本）。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / sync_report.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 224 passed / 0 failed</span>（198 + 本轮 3 用例 + 上游 #17 性能模式合入后新增 23 测试随行）+ Python 契约 18/18。</li>
+              <li>rebase 至最新 main（v0.3.3 + 性能模式 435971b），cherry-pick 重放 9 提交零冲突；CI <code>quality / verify</code> 对 head <code>966966a</code> 运行中。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅 clean_source 失败恢复与暂存清理边界；成功路径行为不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
 </div>
 
   <h2>改动文件清单（vs upstream/main）</h2>
@@ -387,7 +424,7 @@
     <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
     <tbody>
       <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl</code> sync.lua / main.lua / sync_task.lua</td></tr>
-      <tr><td>测试套件</td><td class="ok">198 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 20 个 clean_source 新用例 + 主线随行用例）</td></tr>
+      <tr><td>测试套件</td><td class="ok">224 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 20 个 clean_source 新用例 + 主线随行用例）</td></tr>
       <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
       <tr><td>设备数据动态验证</td><td class="ok">通过</td><td>《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（45 划线）：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code></td></tr>
       <tr><td>真机端到端验证</td><td class="ok">通过</td><td>KPW3 真机：干净原书 + 本地 sync-cache 离线重注成功；1617 份缓存 + 71,177 行想法无损还原；<code>crash.log</code> 无报错（结果已写入 PR #20 说明）</td></tr>
