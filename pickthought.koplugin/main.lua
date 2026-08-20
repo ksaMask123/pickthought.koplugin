@@ -142,14 +142,11 @@ function Plugin:reader_menu()
     if doc_bound then
         items[#items+1]={text="划线样式（"..self:annotation_style_label().."）",
             sub_item_table_func=function() return self:annotation_style_menu() end}
-        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4)。
+        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
+        -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
         local agg=self:_aggregate_sync_state(doc_path)
-        if agg.pending>0 then
-            local label=string.format("继续拉取后续章节(还剩 %d 章)",agg.pending)
-            if agg.books_with_pending>1 then
-                label=label..string.format("（%d 本）",agg.books_with_pending)
-            end
-            items[#items+1]={text=label,
+        if agg.pending>0 or agg.books_failed>0 or agg.books_unknown>0 then
+            items[#items+1]={text=self:_continue_sync_label(agg),
                 callback=self:safe("continue_sync",function() self:sync_entry(doc_path,"sync") end)}
         end
     end
@@ -212,14 +209,11 @@ function Plugin:book_actions(path)
         callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="同步划线与想法",callback=act(function() self:sync_entry(path) end)}}
     if bound then
-        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」(P1#4)。
+        -- 多书聚合:任何一本有待同步章节都提供「继续拉取」(P1#4);失败书/未知书
+        -- 保留入口(评审五轮 P1#2)。
         local agg=self:_aggregate_sync_state(path)
-        if agg.pending>0 then
-            local label=string.format("继续拉取后续章节(还剩 %d 章)",agg.pending)
-            if agg.books_with_pending>1 then
-                label=label..string.format("（%d 本）",agg.books_with_pending)
-            end
-            rows[#rows+1]={{text=label,
+        if agg.pending>0 or agg.books_failed>0 or agg.books_unknown>0 then
+            rows[#rows+1]={{text=self:_continue_sync_label(agg),
                 callback=act(function() self:sync_entry(path,"sync") end)}}
         end
         rows[#rows+1]={{text="清理本书数据",callback=act(function() self:reset_book_data(path) end)}}
@@ -776,9 +770,22 @@ function Plugin:sync_entry(path,mode,opts)
             -- 多书聚合:已处理章数 = 各书总量 - 各书待处理之和,不只看第一本(P1#4)。
             local agg=self:_aggregate_sync_state(path)
             local processed=math.max(0,(tonumber(agg.total) or 0)-(tonumber(agg.pending) or 0))
-            UIManager:show(ConfirmBox:new{
+            local text
+            if #self:_book_ids(path)>1 then
+                -- 多书:不同远程书章节坐标独立,不推导单一连续章节范围(评审五轮 P1#1),
+                -- 只展示聚合数量 + 失败/未知提示。
+                local extra={}
+                if agg.books_failed>0 then extra[#extra+1]=string.format("%d 本上次同步失败",agg.books_failed) end
+                if agg.books_unknown>0 then extra[#extra+1]=string.format("%d 本剩余章节未知",agg.books_unknown) end
+                local note=#extra>0 and ("\n"..table.concat(extra,"；")..",本次将重新尝试") or ""
+                text=string.format("检测到本书已有完整同步缓存\n\n多书聚合:已处理 %d 章,还剩 %d 章\n本次从各书各自的续传位置开始检查新增章节\n结束章节需获取最新目录后确定\n同时补齐缓存中拉取失败的章节%s\n\n如需全部重新拉取,请先使用「重置本书」选项。",
+                    processed,tonumber(agg.pending) or 0,note)
+            else
                 text=string.format("检测到本书已有完整同步缓存\n\n当前已处理到第 %d 章\n本次将从第 %d 章开始检查新增章节\n结束章节需获取最新目录后确定\n同时补齐缓存中拉取失败的章节\n\n如需全部重新拉取,请先使用「重置本书」选项。",
-                    processed,processed+1),
+                    processed,processed+1)
+            end
+            UIManager:show(ConfirmBox:new{
+                text=text,
                 ok_text="继续",
                 ok_callback=function()
                     opts.confirmed=true
@@ -849,22 +856,31 @@ end
 
 -- 聚合某本地书绑定的全部微信读书书的同步状态(P1#4):继续拉取 / 自动拉取 /
 -- 报告不应只读取第一本绑定书,否则第二本有待同步内容时状态与范围会错。
--- 返回 {pending,total,next_index,completed,books_with_pending,per_book={[bid]=state}}。
+-- 返回 {pending,total,next_index,completed,books_with_pending,books_failed,
+--       books_unknown,multi_book,per_book={[bid]=state}}。
 -- next_index 取「有待同步书里最早的续传位置」,使 BatchSync.plan 的起始章合理。
+-- pending=nil(章节列表失败/为空)= 剩余未知:不得当作 0,单独计数 books_unknown,
+-- 失败书不因聚合而消失(评审五轮 P1#2)。
 function Plugin:_aggregate_sync_state(path)
     local ids=self:_book_ids(path)
-    local agg={pending=0,total=0,next_index=0,completed=false,books_with_pending=0,per_book={}}
+    local agg={pending=0,total=0,next_index=0,completed=false,books_with_pending=0,
+        books_failed=0,books_unknown=0,multi_book=#ids>1,per_book={}}
     if #ids==0 then return agg end
     local min_next=nil
     for _, bid in ipairs(ids) do
         local st=self:_sync_state(bid) or {}
         agg.per_book[tostring(bid)]=st
-        local p=tonumber(st.pending) or 0
-        agg.pending=agg.pending+p
-        if p>0 then
-            agg.books_with_pending=agg.books_with_pending+1
-            local nidx=tonumber(st.next_index) or 0
-            if min_next==nil or nidx<min_next then min_next=nidx end
+        if st.failed then agg.books_failed=agg.books_failed+1 end
+        local p=tonumber(st.pending)
+        if p==nil then
+            agg.books_unknown=agg.books_unknown+1
+        else
+            agg.pending=agg.pending+p
+            if p>0 then
+                agg.books_with_pending=agg.books_with_pending+1
+                local nidx=tonumber(st.next_index) or 0
+                if min_next==nil or nidx<min_next then min_next=nidx end
+            end
         end
         agg.total=agg.total+(tonumber(st.total) or 0)
         agg.next_index=math.max(agg.next_index,tonumber(st.next_index) or 0)
@@ -872,6 +888,23 @@ function Plugin:_aggregate_sync_state(path)
     end
     if min_next~=nil then agg.next_index=min_next end
     return agg
+end
+
+-- 「继续拉取」菜单标签(多书聚合,评审五轮 P1#2):待同步章数之外,失败书/未知书
+-- 也要在入口可见,不能因聚合 pending 为 0 而让「继续拉取」入口凭空消失。
+function Plugin:_continue_sync_label(agg)
+    local label
+    if (agg.pending or 0) > 0 then
+        label=string.format("继续拉取后续章节(还剩 %d 章)",agg.pending)
+    else
+        label="继续拉取后续章节(重试失败书)"
+    end
+    local extra={}
+    if agg.books_with_pending>1 then extra[#extra+1]=string.format("%d 本待同步",agg.books_with_pending) end
+    if agg.books_failed>0 then extra[#extra+1]=string.format("%d 本失败",agg.books_failed) end
+    if agg.books_unknown>0 then extra[#extra+1]=string.format("%d 本剩余未知",agg.books_unknown) end
+    if #extra>0 then label=label.."（"..table.concat(extra,"、").."）" end
+    return label
 end
 
 -- 该本地书绑定的全部微信读书书 id(数组,按绑定时间升序),供多书同步入口统一

@@ -985,12 +985,16 @@ function SyncTask:start(task, on_progress, on_done)
                 -- 否则末本游标会覆盖他本,导致重复拉取或跳过章节、.completed 误判。
                 for _, bid in ipairs(book_ids) do
                     local pb = (report.per_book and report.per_book[tostring(bid)]) or {}
-                    local pending = tonumber(pb.pending) or 0
+                    -- pending=nil(章节列表失败/为空)= 剩余未知:不落 0,序列化省略该键,
+                    -- 阅读端聚合时按「未知」处理,不得隐式当 0 吞掉失败书(评审五轮 P1#2)。
+                    local pending = tonumber(pb.pending)
                     local state_data = {
                         total = tonumber(pb.total) or tonumber(report.chapters_total) or 0,
                         pending = pending,
-                        next_index = tonumber(pb.next_index)
-                            or (tonumber(pb.total) or tonumber(report.chapters_total) or 0) + 1,
+                        next_index = tonumber(pb.next_index) or 1,
+                        -- 失败书状态与原因落盘:主界面聚合据此保留失败态并显示原因与续传位。
+                        failed = pb.failed or nil,
+                        error = pb.failed and tostring(pb.error or "同步失败") or nil,
                         retry_after = report.rate_limit_wait and (os.time() + report.rate_limit_wait) or nil,
                         updated_at = os.time(),
                     }

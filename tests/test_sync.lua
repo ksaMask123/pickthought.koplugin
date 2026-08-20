@@ -1058,6 +1058,9 @@ T.case("多书连续失败熔断:记录续传游标且不误标完成(P1#1)", fu
     T.eq(report.per_book["b1"].total, 4, "b1 总量 4")
     T.eq(report.per_book["b2"].pending, 0, "b2 正常完成")
     T.ok(not report.per_book["b2"].failed, "b2 非失败书")
+    -- 评审五轮 P1#2#3:熔断失败书的 pending(剩余 2 章)必须计入聚合 chapters_pending,
+    -- 否则完成报告会同时显示「全书已处理完成」与「某本书同步失败」。
+    T.eq(report.chapters_pending, 2, "失败书剩余章计入聚合 chapters_pending")
 end)
 
 -- 评审四轮 P1#4:多书聚合报告不能把不同远程书的独立章节坐标拼成单一连续区间。
@@ -1151,4 +1154,118 @@ T.case("多书游标不同范围不连续时不报合并区间(P1#4)", function(
     T.eq(report.per_book["b1"].batch_end, 10, "b1 逐书 batch_end=10")
     T.eq(report.per_book["b2"].total, 3, "b2 真实总数")
     T.eq(report.per_book["b2"].batch_end, 3, "b2 逐书 batch_end=3")
+end)
+
+-- 评审五轮 P1#2:多书章节列表为空时不得当「成功」返回——否则任务层按空状态写
+-- .completed,失败书被误标完成、续传入口消失。必须写 per_book 失败态(pending=nil),
+-- 其余书正常继续。
+T.case("多书章节列表为空:记失败态且不生成 .completed 语义(P1#2)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},   -- b1 章节列表为空,b2 正常
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                return {data = {}}   -- 空列表:不明原因,不得当「无内容完成」
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+                {chapterUid=2,title="b2-2",chapterIdx=2},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local report = Sync.run(deps)
+    T.ok(report, "b2 正常取到数据,整体不应硬失败")
+    T.ok(report.per_book and report.per_book["b1"], "b1 有 per_book 记录")
+    T.ok(report.per_book["b1"].failed == true, "b1 标记 failed(空列表=失败态,不误标完成)")
+    T.ok(report.per_book["b1"].pending == nil, "b1 pending=nil(剩余未知,不得当 0)")
+    T.eq(report.per_book["b1"].total, 0, "b1 总量 0")
+    T.eq(report.per_book["b1"].next_index, 1, "b1 续传起点 1")
+    T.eq(report.per_book["b2"].pending, 0, "b2 正常完成")
+    T.eq(report.multi_book, true, "报告带多书标志(展示层据此不推导伪范围)")
+end)
+
+-- 评审五轮 P1#2:多书全部失败(章节列表请求失败)时整体必须报错并列出各书原因,
+-- 不得返回一个「看起来成功」的空报告。
+T.case("多书全部失败:整体报错并列出各书原因(P1#2)", function()
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            error("章节列表请求失败:book=" .. tostring(bid))
+        end},
+        annotations = { fetch_chapter = function() return {} end },
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function() return "" end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {} end,
+        progress = function() return true end,
+    }
+    local report, err = Sync.run(deps)
+    T.ok(report == nil, "全部失败应整体报错")
+    local e = tostring(err)
+    T.ok(e:find("以下书同步失败", 1, true), "报错指明多书失败: " .. e)
+    T.ok(e:find("b1", 1, true) and e:find("b2", 1, true), "报错列出失败书: " .. e)
+end)
+
+-- 评审五轮 P1#2:失败书状态落盘后(per_book.failed + pending=nil),再次同步重试
+-- 失败书并成功;失败态不会让「继续拉取」入口消失,续传起点不丢。
+T.case("多书章节列表失败后再次同步:重试失败书成功(P1#2)", function()
+    local attempt = 0
+    local deps = {
+        doc_path = "/books/合集.epub",
+        book_ids = {"b1", "b2"},
+        file_exists = function() return false end,
+        rename = function() return true end,
+        remove = function() return true end,
+        api = { chapters = function(_, bid)
+            if bid == "b1" then
+                attempt = attempt + 1
+                if attempt == 1 then error("章节列表请求失败:网络超时") end
+                return {data = {
+                    {chapterUid=1,title="b1-1",chapterIdx=1},
+                }}
+            end
+            return {data = {
+                {chapterUid=1,title="b2-1",chapterIdx=1},
+            }}
+        end},
+        annotations = { fetch_chapter = function(_, _, uid)
+            return {underlines={{range="0-7",markText="春江潮水连海平"}}, review_map={}, review_groups={},
+                underline_count=1, thought_count=0, thought_entry_count=0, errors={}}
+        end},
+        load_meta = function() return {spine={{href="c1"}}, has={}} end,
+        read_text = function(_, href)
+            return "<html><body><p>春江潮水连海平,海上明月共潮生。</p></body></html>"
+        end,
+        save_thoughts = function() return 0 end,
+        inject = function() return {injected=1,marks=1,unmatched={},quote_aligned=1,dropped=0,underlines_resolved=1,thoughts_linked=0,thoughts_linked_by_uid={},merges={}} end,
+        progress = function() return true end,
+    }
+    local r1 = Sync.run(deps)
+    T.ok(r1, "首次:b2 成功,b1 软失败,整体仍出报告")
+    T.ok(r1.per_book["b1"].failed == true, "首次 b1 失败态")
+    T.ok(r1.per_book["b1"].pending == nil, "首次 b1 pending=nil(剩余未知)")
+    T.eq(r1.per_book["b2"].pending, 0, "首次 b2 完成")
+    local r2 = Sync.run(deps)
+    T.ok(r2, "重试应成功")
+    T.eq(r2.per_book["b1"].pending, 0, "重试后 b1 完成")
+    T.ok(not r2.per_book["b1"].failed, "重试后 b1 无失败标记")
+    T.eq(r2.per_book["b2"].pending, 0, "b2 保持完成")
 end)

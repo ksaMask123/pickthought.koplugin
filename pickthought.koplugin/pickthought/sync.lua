@@ -159,8 +159,12 @@ function Sync.run(deps)
         chapters_total_all = chapters_total_all + #chapter_list
         if #chapter_list == 0 then
             if multi_book then
-                logger.warn("[撷思][Sync] 子书章列表为空,跳过", "book=", tostring(bid))
-                return true
+                -- 章节列表为空:明确失败态,不得当「成功」返回(评审五轮 P1#2)。
+                -- 否则任务层按空状态生成 .completed,失败书被误标完成、续传入口消失。
+                -- pending=nil(剩余未知)保持缺失语义,聚合端不得当作 0。
+                per_book[bid] = {failed = true, error = "微信读书返回的章节列表为空",
+                    next_index = 1, pending = nil, total = 0, start = 1}
+                return false, per_book[bid].error
             end
             return nil, "微信读书返回的章节列表为空"
         end
@@ -348,9 +352,17 @@ function Sync.run(deps)
             -- 硬中止(用户取消 / 单书致命错误):直接退出整个同步。
             return nil, err
         elseif ok == false then
-            -- 多书:本书软失败(章节列表拉取失败 / 连续失败熔断),记录后继续下一本,
-            -- 不让第一本拖垮整批(评审二轮 P1#2)。
+            -- 多书:本书软失败(章节列表拉取失败 / 章节列表为空 / 连续失败熔断),
+            -- 记录后继续下一本,不让第一本拖垮整批(评审二轮 P1#2)。
             failed_books[#failed_books + 1] = bid
+            -- 失败书已知的待处理章节计入聚合 chapters_pending(评审五轮 P1#2#3):
+            -- 熔断书 pending=剩余章,若不计入,完成报告会同时显示「全书已处理完成」
+            -- 与「某本书同步失败」;pending=nil(章节列表失败/为空 = 剩余未知)保持
+            -- 缺失语义,聚合端不得当作 0 而吞掉失败书。
+            local pb = per_book[bid]
+            if pb and pb.pending then
+                chapters_pending = chapters_pending + pb.pending
+            end
         end
     end
     -- 聚合批次起止:单书时 batch_start/end 即本书真实章节区间,直接取本书;
@@ -383,6 +395,8 @@ function Sync.run(deps)
         report.chapters_processed = chapters_processed
         report.chapters_fetch_succeeded = chapters_fetch_succeeded
         report.batch_limit = chapter_budget or fetch_budget or chapters_total_all
+        -- 多书标志:报告/弹窗层据此不推导单一连续章节范围(评审五轮 P1#1)。
+        report.multi_book = multi_book or nil
         -- 按书续传游标,供调用方逐书写 state.json / .completed(P1#5)。
         report.per_book = per_book
         return report
