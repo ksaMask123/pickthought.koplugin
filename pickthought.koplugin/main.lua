@@ -140,8 +140,7 @@ function Plugin:reader_menu()
     local doc_path=self:current_doc_path()
     local doc_bound=doc_path and Binding.get(self.store,doc_path)
     if doc_bound then
-        items[#items+1]={text="划线样式（"..self:annotation_style_label().."）",
-            sub_item_table_func=function() return self:annotation_style_menu() end}
+        items[#items+1]=self:annotation_style_item()
         -- 多书聚合:任何一本有待同步章节都提供「继续拉取」,不只看第一本(P1#4);
         -- 失败书/剩余未知书同样保留入口,不让聚合 0 吞掉失败态(评审五轮 P1#2)。
         local agg=self:_aggregate_sync_state(doc_path)
@@ -209,6 +208,9 @@ function Plugin:book_actions(path)
         callback=act(function() self:bind_book(path) end)}}
     rows[#rows+1]={{text="同步划线与想法",callback=act(function() self:sync_entry(path) end)}}
     if bound then
+        -- 划线样式入口(上游 v0.3.3 契约:文件管理器书籍操作保留样式入口)。
+        rows[#rows+1]={{text="划线样式（"..self:annotation_style_label().."）",
+            callback=act(function() self:list("划线样式",self:annotation_style_menu()) end)}}
         -- 多书聚合:任何一本有待同步章节都提供「继续拉取」(P1#4);失败书/未知书
         -- 保留入口(评审五轮 P1#2)。
         local agg=self:_aggregate_sync_state(path)
