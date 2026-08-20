@@ -50,9 +50,9 @@
     <div class="kv">
       <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
       <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (a8c2e1f, v0.3.2) · 已 rebase 最新 main 并解决冲突（保留主线 test_sync_state / test_sync_gate / test_thought_popup / test_updater 测试）</div>
-      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希）</div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希） · <code>3d74d61</code> fix(clean-source): 默认 copy_file 包装 return step() 让取消传播 + 默认路径取消测试 · <code>9708ca2</code> fix(clean-source): 作者第6轮复审 — .orig.old 失败恢复 + 遗留 .old 中断恢复</div>
       <div class="k">改动文件</div><div class="v">9 个：<code>sync.lua</code> (+221)、<code>main.lua</code> (+46)、<code>binding.lua</code> (+11，新增 <code>offer_reinject</code> 纯判定)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+110，流式复制+内容指纹+路径哈希)、<code>tests/run.lua</code> (+1)、<code>tests/test_binding.lua</code> (+11)、<code>tests/test_sync.lua</code> (+4)、<code>tests/test_sync_clean_source.lua</code> (+509，共 19 用例)</div>
-      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 194/0</span><span class="badge b-acc">含 19 个 clean_source 用例</span><span class="badge b-acc">rebase 最新 main 后 24 个主线新增用例随行</span><span class="badge b-good">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
+      <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 198/0</span><span class="badge b-acc">含 19 个 clean_source 用例</span><span class="badge b-acc">rebase 最新 main 后 24 个主线新增用例随行</span><span class="badge b-good">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
     </div>
   </div>
 
@@ -327,6 +327,44 @@
       </div>
     </div>
 
+    <div class="tl-item">
+      <div class="tl-date">2026-08-20（评审六轮 · 失败恢复与备份保留）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-19 第6轮意见（提交 9708ca2）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-19 指出两处失败恢复 / 备份保留边界：<b>①</b> 当前书是干净原书、已有 <code>.orig</code> 时，流程先把旧备份移到 <code>.orig.old</code> 再固化新源；若复制失败 / 取消，恢复逻辑只检查 <code>书.epub.old</code>，不会把 <code>书.epub.orig.old</code> 恢复回标准 <code>.orig</code> 路径——当前书虽未破坏，但后续直接重注会误报找不到原书备份。<b>②</b> 启动重建时只要发现 <code>.old</code> 就直接删除；若上次进程中断在「主书已移入 <code>.old</code>、新书尚未换回」阶段，下一次会出现主文件缺失、<code>.old</code> 存在的状态，直接清理会丢失最后一份可恢复文件。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li>新增 <code>restore_backup_old()</code> 助手：<code>.orig.old</code> 存在时，先移除残缺/半成品的 <code>.orig</code> 目标（Windows <code>rename</code> 不允许覆盖已存在目标），再还原为标准 <code>.orig</code> 路径。</li>
+              <li>干净书 + 外部 clean_source 分支：固化失败与用户取消两条路径均恢复旧 <code>.orig</code>，并如实提示「原书未改动」（此时 doc_path 尚未离位，旧代码却谎称「无法恢复当前书」）。</li>
+              <li>换位（swap）失败回滚分支：doc_path 恢复后同样还原 <code>.orig.old</code>，避免后续重注误报缺备份；恢复失败时在提示中给出 <code>.orig.old</code> 实际位置与手动指令。</li>
+              <li>遗留 <code>.old</code> 中断恢复：clean_source 重建入口先处理残留——doc_path 缺失而 <code>.old</code> 存在时，把 <code>.old</code> 恢复回 doc_path 并重新解析当前书（绝不删除）；doc_path 存在时才确认可解析（<code>load_meta</code> pcall），可解析才认定 <code>.old</code> 为陈旧残留而删除，损坏时保留并中止。</li>
+              <li>顺带修正 swap 失败提示措辞：「已恢复旧注入版」→「已恢复暂存副本」，与文件实际来源一致（干净书分支暂存的 <code>.old</code> 是干净原书，并非注入版）。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 3 用例，共 23）</div>
+          <div class="v">
+            <ul>
+              <li>「已有 .orig 时固化失败 → .orig.old 恢复为 .orig（原书未改动）」——验证恢复 rename 确实发生、doc_path 未被移动、不谎称已恢复原书。</li>
+              <li>「已有 .orig 时固化取消 → .orig.old 恢复为 .orig（原书未改动）」——取消同样还原旧备份，且不执行最终 swap。</li>
+              <li>「主文件缺失而 .old 存在（中断残留）→ 恢复 .old 而非删除，重建成功」——断言第一个文件动作是 <code>.old → doc_path</code> 的恢复 rename 而非删除。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 198 passed / 0 failed</span>（较五轮 195 新增 3 个失败恢复/中断恢复用例）。</li>
+              <li>Diff 复核：仅 sync.lua（+81/−13）与 test_sync_clean_source.lua（+133），无泄漏无关改动；PR diff 不进 fork main 审计目录。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅补强 clean_source 失败恢复与备份保留边界；成功路径行为不变，向后兼容、无破坏性。</div>
+        </div>
+      </div>
+    </div>
 </div>
 
   <h2>改动文件清单（vs upstream/main）</h2>
@@ -349,7 +387,7 @@
     <thead><tr><th>检查项</th><th>结果</th><th>方式</th></tr></thead>
     <tbody>
       <tr><td>LuaJIT 语法</td><td class="ok">通过</td><td><code>luajit -bl</code> sync.lua / main.lua / sync_task.lua</td></tr>
-      <tr><td>测试套件</td><td class="ok">195 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 20 个 clean_source 新用例 + 主线随行用例）</td></tr>
+      <tr><td>测试套件</td><td class="ok">198 / 0</td><td><code>luajit tests/run.lua</code>（仓库根目录，含 20 个 clean_source 新用例 + 主线随行用例）</td></tr>
       <tr><td>加载期</td><td class="ok">通过</td><td>全量 <code>require</code> 测试模块无错误</td></tr>
       <tr><td>设备数据动态验证</td><td class="ok">通过</td><td>《神秘复苏》真实脏 <code>.orig</code> + 真实离线缓存（45 划线）：无 clean_source 复现「原书备份本身是注入版」卡点；有 clean_source 绕过并走到注入、<code>src=干净原书</code>、离线划线数据贯通、干净源固化为新 <code>.orig</code></td></tr>
       <tr><td>真机端到端验证</td><td class="ok">通过</td><td>KPW3 真机：干净原书 + 本地 sync-cache 离线重注成功；1617 份缓存 + 71,177 行想法无损还原；<code>crash.log</code> 无报错（结果已写入 PR #20 说明）</td></tr>
