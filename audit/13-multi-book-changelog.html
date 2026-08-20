@@ -389,12 +389,44 @@
         </div>
       </div>
     </div>
+
+    <div class="tl-item">
+      <div class="tl-date">2026-08-20 晚（评审六轮 · 漏注入新缓存/报告全完成/限速按书隔离 + 菜单去重）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-20 第6轮意见（提交 0bbed48）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-20（T12:34:28Z）指出三处边界 + 一处菜单重复：<b>①</b> 失败/取消后可能漏注入新缓存——失败状态落盘仍用旧 <code>state.json</code>，旧 <code>.completed</code> 不在失败/取消/部分完成时清除，下次同步因旧完成标记开启 <code>skip_resumed</code>，把本次已拉取但未注入的章节缓存当成已处理跳过；<b>②</b> 多书部分失败时报告仍可能显示「全部章节已处理完成」（章节列表失败的书 <code>pending=nil</code> 被聚合当 0）；<b>③</b> 限速等待未按书隔离——<code>retry_after</code> 写入所有绑定书，一本书限速拖累全部；<b>④</b> 文件管理器操作菜单重复「重新绑定微信读书」入口。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><strong>漏注入新缓存（P1#1）</strong>：<code>sync_task.lua</code> 状态落盘时，本次未明确完成（失败/取消/剩余未知/仍有 pending）的书显式清除旧 <code>.completed</code>；失败/取消路径（report=nil）同样清除。测试：<code>skip_resumed=false</code> 时缓存章节全部重新注入（幂等），与「跳过旧章」互为对照。</li>
+              <li><strong>报告不显示全部完成（P1#2）</strong>：<code>sync.lua</code> 报告附 <code>failed_books</code> 列表；<code>sync_report</code> 在 <code>pending==0</code> 但存在失败书时显示「有书同步失败/剩余未知:...」，不再误报「全部章节已处理完成」。测试：一书成功、一书章节列表失败的报告用例。</li>
+              <li><strong>限速按书隔离（P2#3）</strong>：<code>sync.lua</code> <code>per_book[bid]</code> 记录 <code>rate_limit_wait</code>（仅限速书）；<code>sync_task</code> 的 <code>retry_after</code> 只写入实际限速的书，开始等待取 max（等各自过期），未限速书不受影响。</li>
+              <li><strong>菜单去重</strong>：<code>main.lua</code> <code>book_actions</code> 删除重复的「重新绑定微信读书」入口；<code>test_menu_contract.py</code> 新增契约断言（操作菜单仅一个绑定入口）。</li>
+            </ul>
+          </div>
+          <div class="k">rebase 至最新 main（性能模式 435971b）</div>
+          <div class="v">上游合入 #17 性能模式（435971b）后 PR 一度 CONFLICTING；cherry-pick 重放 5 提交（<code>1fa8112</code> 多书内容、<code>5bbe911</code> 四轮、<code>43666dc</code> 五轮、<code>546af4c</code> 契约回归、<code>5968ae7</code> 六轮），解决 <code>epub_inject.lua</code> / <code>main.lua</code> / <code>test_epub_inject.lua</code> / <code>test_sync.lua</code> 冲突：epub_inject 以多书版为底合并 #17 的 PerformanceMode 让出；main.lua 前台 inject 同时保留 no-op perf 与 book_ids 透传；测试两版用例合并。回归修复提交 <code>0bbed48</code>。</div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（全部改动文件）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 222 passed / 0 failed</span>（205 + 本轮 3 用例 + 上游 #17 性能模式新增测试随行）+ Python 契约 19/19。</li>
+              <li>CI <code>quality / verify</code> 对 head <code>0bbed48</code> 运行中。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">状态落盘 / 报告聚合 / 限速等待边界 + 菜单去重；成功路径行为不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
     </div>
 
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>205 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>222 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
