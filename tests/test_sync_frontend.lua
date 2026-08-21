@@ -149,21 +149,43 @@ end)
 -- 未限速书 B 正常拉取注入并生成 .completed;多书重建时 A 的已缓存划线照常参与注入。
 T.case("多书限速冷却:A 冷却只读缓存不发网络,B 正常完成,无全局等待", function()
     local dir = "tests/.tmp_cooldown"
+    -- 平台适配(CI 是 Linux,本地是 Windows):目录/临时文件操作按平台分支。
+    local IS_WINDOWS = package.config:sub(1, 1) == "\\"
+    local function rm_dir(d)
+        if IS_WINDOWS then os.execute('rd /s /q "' .. d .. '" 2>nul')
+        else os.execute('rm -rf "' .. d .. '" 2>/dev/null') end
+    end
+    local function rm_glob(glob)
+        if IS_WINDOWS then
+            os.execute('del /q "' .. glob .. '" 2>nul')
+        else
+            os.execute('rm -f ' .. glob .. ' 2>/dev/null')
+        end
+    end
+    local function mkdirs(d)
+        if IS_WINDOWS then
+            os.execute('mkdir "' .. d .. '" 2>nul')
+        else
+            os.execute('mkdir -p "' .. d .. '"')
+        end
+    end
     -- 开头清理上次残留(断言失败时清理代码不执行,残留的 .orig 会让 src 取错、
     -- 干扰本次运行;每次运行必须从干净状态开始)。
-    os.execute('rd /s /q "' .. dir .. '" 2>nul')
-    os.execute('del /q "tests\\sync-progress-*.json" "tests\\sync-result-*.json" "tests\\sync-cancel-*" 2>nul')
+    rm_dir(dir)
+    rm_glob(IS_WINDOWS and "tests\\sync-progress-*.json" or "tests/sync-progress-*.json")
+    rm_glob(IS_WINDOWS and "tests\\sync-result-*.json" or "tests/sync-result-*.json")
+    rm_glob(IS_WINDOWS and "tests\\sync-cancel-*" or "tests/sync-cancel-*")
     local function write_file(path, content)
         local f = assert(io.open(path, "w")); f:write(content); f:close()
     end
     local function fexists(p)
         local f = io.open(p, "rb"); if not f then return false end; f:close(); return true
     end
-    -- Windows cmd 语法逐级创建(cmd 的 mkdir 接受正斜杠,避免反斜杠转义坑)。
-    os.execute('mkdir "' .. dir .. '" 2>nul')
-    os.execute('mkdir "' .. dir .. '/bA" 2>nul')
-    os.execute('mkdir "' .. dir .. '/bA/sync-cache" 2>nul')
-    os.execute('mkdir "' .. dir .. '/bB/sync-cache" 2>nul')
+    -- 逐级创建缓存目录(Windows cmd 与 Linux mkdir -p 分别处理)。
+    mkdirs(dir)
+    mkdirs(dir .. "/bA")
+    mkdirs(dir .. "/bA/sync-cache")
+    mkdirs(dir .. "/bB/sync-cache")
     -- A 冷却:state.json 带未过期 retry_after;chapters.json 缓存;1.json 章节缓存(旧划线)。
     write_file(dir .. '/bA/sync-cache/state.json',
         string.format('{"retry_after":%d,"next_index":1,"pending":1,"total":1}', os.time() + 600))
@@ -286,8 +308,10 @@ T.case("多书限速冷却:A 冷却只读缓存不发网络,B 正常完成,无�
     -- ⑤ 多书重建:A 的已缓存划线参与注入(B 正常拉取也注入)。
     T.ok(captured.inject_called, "注入执行(A 缓存划线 + B 新划线一起重建)")
 
-    -- 清理临时文件与缓存目录(cmd 语法;反斜杠在 Lua 字符串中转义为 \\\\ )。
-    os.execute('rd /s /q "' .. dir .. '" 2>nul')
+    -- 清理临时文件与缓存目录(平台自适应)。
+    rm_dir(dir)
     os.remove("tests/.tmp_cooldown_settings.lua")
-    os.execute('del /q "tests\\sync-progress-*.json" "tests\\sync-result-*.json" "tests\\sync-cancel-*" 2>nul')
+    rm_glob(IS_WINDOWS and "tests\\sync-progress-*.json" or "tests/sync-progress-*.json")
+    rm_glob(IS_WINDOWS and "tests\\sync-result-*.json" or "tests/sync-result-*.json")
+    rm_glob(IS_WINDOWS and "tests\\sync-cancel-*" or "tests/sync-cancel-*")
 end)
