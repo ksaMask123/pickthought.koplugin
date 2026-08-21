@@ -17,9 +17,13 @@ package.preload["ui/trapper"] = function()
     return { info = function() return true end, clear = function() end }
 end
 -- 模拟真实设备存在 ffi/util.usleep:默认 rest 会真正 sleep 阻塞前台协程。
+-- max_us 记录单次最大 sleep 时长(评审七轮:用于断言多书限速冷却不做全局大等待)。
 package.preload["ffi/util"] = function()
     return { gettime = function() return 1700000000, 0 end,
-        usleep = function() usleep_spy.calls = usleep_spy.calls + 1 end }
+        usleep = function(us)
+            usleep_spy.calls = usleep_spy.calls + 1
+            usleep_spy.max_us = math.max(usleep_spy.max_us or 0, tonumber(us) or 0)
+        end }
 end
 -- 其余 KOReader 模块(ui/*、apps/*、device、dispatcher、libs/*)统一桩为占位表,
 -- 避免逐个枚举遗漏(如 ui/widget/qrmessage 等)。
@@ -42,9 +46,12 @@ package.preload["pickthought.thoughts"] = function()
         close_book = function() end,
     }
 end
+-- 网络拉取调用记录(评审七轮:用于断言冷却书 A 不走网络、正常书 B 走网络)。
+local fetcher_calls = {}
 package.preload["pickthought.web_fetch"] = function()
     return { new = function()
         return { fetch_chapter = function(_, book_id, uid)
+            fetcher_calls[#fetcher_calls + 1] = tostring(book_id) .. ":" .. tostring(uid)
             -- 至少返回一条划线 + 想法,使 Sync.run 越过「没有划线」闸门、走到 inject。
             return {
                 underlines = { { range = "0-7", markText = "春江潮水连海平" } },
@@ -78,6 +85,12 @@ package.preload["pickthought.epub_inject"] = function()
     return { inject_copy = function(_, _, mapped, options)
         captured.inject_called = true
         captured.perf = options and options.perf
+        -- 模拟产物文件:Sync.run 注入后 rename temp_dest → doc_path,桩必须落盘。
+        local dest = options and options.dest
+        if dest then
+            local okc, f = pcall(io.open, dest, "w")
+            if okc and f then f:write("INJECTED"); f:close() end
+        end
         return { injected = #(mapped or {}), marks = 0, unmatched = {}, dropped = 0 }
     end }
 end
@@ -127,4 +140,154 @@ T.case("前台 _sync_run 适配器透传 no-op rest,绝不调用 usleep(作者 #
     local PerformanceMode = require("pickthought.performance_mode")
     PerformanceMode.default()._rest()
     T.ok(usleep_spy.calls > 0, "对照:默认 rest(ffi/util.usleep 存在)应触发 usleep(前台必须避免此路径)")
+end)
+
+
+-- 评审七轮(2026-08-21):多书限速冷却调度——A 书 retry_after 未过期(限速冷却)、
+-- B 书正常:任务不再按全部书 max retry_after 做启动前全局 usleep;冷却书 A 的
+-- 章节列表与章节数据都只读本地缓存(绝不发网络)、保留原状态且不生成 .completed;
+-- 未限速书 B 正常拉取注入并生成 .completed;多书重建时 A 的已缓存划线照常参与注入。
+T.case("多书限速冷却:A 冷却只读缓存不发网络,B 正常完成,无全局等待", function()
+    local dir = "tests/.tmp_cooldown"
+    -- 开头清理上次残留(断言失败时清理代码不执行,残留的 .orig 会让 src 取错、
+    -- 干扰本次运行;每次运行必须从干净状态开始)。
+    os.execute('rd /s /q "' .. dir .. '" 2>nul')
+    os.execute('del /q "tests\\sync-progress-*.json" "tests\\sync-result-*.json" "tests\\sync-cancel-*" 2>nul')
+    local function write_file(path, content)
+        local f = assert(io.open(path, "w")); f:write(content); f:close()
+    end
+    local function fexists(p)
+        local f = io.open(p, "rb"); if not f then return false end; f:close(); return true
+    end
+    -- Windows cmd 语法逐级创建(cmd 的 mkdir 接受正斜杠,避免反斜杠转义坑)。
+    os.execute('mkdir "' .. dir .. '" 2>nul')
+    os.execute('mkdir "' .. dir .. '/bA" 2>nul')
+    os.execute('mkdir "' .. dir .. '/bA/sync-cache" 2>nul')
+    os.execute('mkdir "' .. dir .. '/bB/sync-cache" 2>nul')
+    -- A 冷却:state.json 带未过期 retry_after;chapters.json 缓存;1.json 章节缓存(旧划线)。
+    write_file(dir .. '/bA/sync-cache/state.json',
+        string.format('{"retry_after":%d,"next_index":1,"pending":1,"total":1}', os.time() + 600))
+    write_file(dir .. '/bA/sync-cache/chapters.json',
+        '{"data":[{"chapterUid":1,"title":"第一章","chapterIdx":1}]}')
+    write_file(dir .. '/bA/sync-cache/1.json',
+        '{"underlines":[{"range":"0-7","markText":"A旧划线"}],"review_groups":[],"underline_count":1,"thought_count":0,"thought_entry_count":0,"errors":[],"underline_request_ok":true}')
+    -- 主书文件(多书重建先备份 doc_path → .orig)。
+    write_file(dir .. "/book.epub", "EPUB-CONTENT")
+    -- 父进程侧 settings 文件(U.copy_file 复制到 worker settings)。
+    write_file("tests/.tmp_cooldown_settings.lua", "return {}\n")
+
+    -- 网络调用记录 + worker 侧依赖桩。
+    -- 关键:清掉 run.lua 前面测试缓存的真实 store/http/api/web_fetch 等模块,
+    -- 让下面的桩(含文件级 web_fetch/epub_reader/epub_inject/thoughts 桩)生效;
+    -- pickthought.sync 保持真实(Sync.run 走完整逻辑)。
+    for _, m in ipairs({ "pickthought.store", "pickthought.http", "pickthought.api",
+        "pickthought.web_fetch", "pickthought.epub_reader", "pickthought.epub_inject",
+        "pickthought.thoughts" }) do
+        package.loaded[m] = nil
+    end
+    local api_chapters_calls = {}
+    fetcher_calls = {}
+    package.preload["pickthought.store"] = function()
+        return { new = function()
+            return {
+                book_dir = function(_, bid) return "tests/.tmp_cooldown/" .. tostring(bid) end,
+                auth = function() return {} end,
+            }
+        end }
+    end
+    package.preload["pickthought.http"] = function()
+        return { new = function() return {} end }
+    end
+    package.preload["pickthought.api"] = function()
+        return { new = function()
+            return { chapters = function(_, bid)
+                api_chapters_calls[#api_chapters_calls + 1] = tostring(bid)
+                return { data = { { chapterUid = 1, title = "第一章", chapterIdx = 1 } } }
+            end }
+        end }
+    end
+
+    -- 关键:run.lua 前面 test_sync_task 已 require sync_task 并缓存其 ffi/util 桩
+    -- (runInSubProcess 不执行 fn)。强制重载,让本文件顶部含 usleep 的桩生效,
+    -- 且 SyncTask 的 FFIUtil upvalue 与后续修改的 FFIUtil 指向同一张表。
+    package.loaded["pickthought.sync_task"] = nil
+    package.loaded["ffi/util"] = nil
+    local SyncTask = require("pickthought.sync_task")
+    local task_store = {
+        temp_dir = "tests",
+        settings_path = "tests/.tmp_cooldown_settings.lua",
+        data_dir = "tests",
+        flush = function() end,
+        preferences = function() return { sync_batch_limit = 200, sync_keep_awake = false, sync_debug = false } end,
+    }
+    local task = SyncTask:new(task_store)
+    task._prepare_worker_memory = function() return true end
+    task._release_memory_mode = function() end
+    task._enable_memory_mode = function() return true end
+
+    local UIManager = require("ui/uimanager")
+    UIManager.scheduleIn = function() end  -- start() 尾部 _schedule 用
+    local FFIUtil = require("ffi/util")
+    FFIUtil.isSubProcessDone = function() return true end  -- available() 要求存在
+    FFIUtil.runInSubProcess = function(fn)  -- 同步执行 worker,pid=1。
+        fn()
+        return 1
+    end
+    usleep_spy.calls = 0
+    usleep_spy.max_us = 0
+    captured.inject_called = false
+
+    local ok, err = task:start({
+        doc_path = "tests/.tmp_cooldown/book.epub",
+        book_id = "bB",
+        book_ids = { "bA", "bB" },
+        mode = "sync",
+        allow_memory_retry = true,
+    })
+    T.ok(ok, "多书同步任务启动: " .. tostring(err))
+
+    -- 结果 payload:worker 已同步执行完并写 result。
+    local result = nil
+    if task.job and task.job.result_path then
+        local raw = (require("pickthought.util")).read_file(task.job.result_path, true)
+        if raw then
+            local good, dec = pcall(require("pickthought.json").decode, raw)
+            if good then result = dec end
+        end
+    end
+    if not (result and result.ok == true) then
+        print("DIAG worker failed:", result and tostring(result.error) or "result=nil",
+            "| result_path=", task.job and task.job.result_path or "nil")
+        local raw2 = task.job and task.job.result_path
+            and (require("pickthought.util")).read_file(task.job.result_path, true) or nil
+        print("DIAG raw result:", raw2 or "nil")
+    end
+    T.ok(result and result.ok == true, "worker 同步成功")
+
+    -- ① 无全局等待:所有 usleep 均 < 1 秒(礼貌间隔 200-400ms;启动前全局冷却等待已删除)。
+    T.ok(usleep_spy.max_us < 1000000, "无启动前全局冷却等待(max_usleep=" .. tostring(usleep_spy.max_us) .. ")")
+    -- ② A 不发网络:章节列表与章节数据都走缓存,api/fetcher 零调用 A。
+    T.eq(#api_chapters_calls, 1, "只有 B 被请求章节列表(A 冷却走缓存)")
+    T.eq(api_chapters_calls[1], "bB", "请求章节列表的书是 B")
+    T.eq(#fetcher_calls, 1, "只有 B 走网络拉取(A 冷却读缓存)")
+    T.eq(fetcher_calls[1], "bB:1", "网络拉取的是 B 第 1 章")
+    -- ③ A 不生成 .completed(冷却书保留原状态);B 正常完成生成 .completed。
+    T.ok(not fexists(dir .. '/bA/sync-cache/.completed'), "冷却书 A 不生成 .completed")
+    T.ok(fexists(dir .. '/bB/sync-cache/.completed'), "正常书 B 生成 .completed")
+    -- ④ A 的 state.json 原样保留(retry_after 未被动)。
+    local a_state = nil
+    local a_raw = (require("pickthought.util")).read_file(dir .. '/bA/sync-cache/state.json', true)
+    if a_raw then
+        local good, dec = pcall(require("pickthought.json").decode, a_raw)
+        if good then a_state = dec end
+    end
+    T.ok(a_state and a_state.retry_after and a_state.retry_after > os.time(),
+        "冷却书 A 的 state.json 保留原 retry_after(未覆盖)")
+    -- ⑤ 多书重建:A 的已缓存划线参与注入(B 正常拉取也注入)。
+    T.ok(captured.inject_called, "注入执行(A 缓存划线 + B 新划线一起重建)")
+
+    -- 清理临时文件与缓存目录(cmd 语法;反斜杠在 Lua 字符串中转义为 \\\\ )。
+    os.execute('rd /s /q "' .. dir .. '" 2>nul')
+    os.remove("tests/.tmp_cooldown_settings.lua")
+    os.execute('del /q "tests\\sync-progress-*.json" "tests\\sync-result-*.json" "tests\\sync-cancel-*" 2>nul')
 end)

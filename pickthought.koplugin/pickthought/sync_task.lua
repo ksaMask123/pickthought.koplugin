@@ -57,6 +57,18 @@ local function serializable_copy(value, seen)
     return out
 end
 
+-- 限速冷却判定(评审七轮 2026-08-21):previous_states[bid].retry_after 未过期的书
+-- 本轮暂缓网络请求——章节列表与章节数据都只读本地缓存,绝不发网络,下一轮冷却
+-- 结束后再补拉;未限速书不受影响。返回 cooldown 表(cooldown[bid] = true)。
+local function cooling_books(previous_states, book_ids, now)
+    local cooldown = {}
+    for _, bid in ipairs(book_ids) do
+        local ra = tonumber((previous_states[bid] or {}).retry_after)
+        if ra and ra > (now or os.time()) then cooldown[bid] = true end
+    end
+    return cooldown
+end
+
 function SyncTask:new(store)
     local owner_token = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
     local instance = setmetatable({
@@ -721,6 +733,10 @@ function SyncTask:start(task, on_progress, on_done)
                 end
                 completed_markers[bid] = UChild.file_exists(cache_for(bid) .. "/.completed")
             end
+            -- 限速冷却(评审七轮):retry_after 未过期的书本轮不发网络、只读缓存,
+            -- 已缓存章节照常参与注入;未限速书正常拉取。不再做任务启动前的全局
+            -- 等待(此前取全部书 max retry_after 统一 usleep,一本书限速拖累整批)。
+            local cooldown = cooling_books(previous_states, book_ids)
             -- 不再清 .completed 缓存:已缓存的章节 resumed 跳过(免费),失败的(缓存
             -- 损坏/不存在)重拉。用户想全新重拉走「重置本书」。之前清缓存导致用户
             -- 点「同步」补齐失败章节时缓存全没(issue #2 评论)。
@@ -728,6 +744,17 @@ function SyncTask:start(task, on_progress, on_done)
             local api_for_sync = {
                 chapters = function(_, bid)
                     local chapters_cache_path = cache_for(bid) .. "/chapters.json"
+                    if cooldown[bid] then
+                        -- 限速冷却(评审七轮):不发网络,读上次章节列表缓存——保证
+                        -- 已缓存章节照常参与本次注入(多书重建不丢冷却书旧内容)。
+                        local raw = UChild.read_file(chapters_cache_path, true)
+                        if not raw then error("本书正处于限速冷却且没有章节缓存,请稍后再同步") end
+                        local ok_decode, decoded = pcall(JsonChild.decode, raw)
+                        if not ok_decode or type(decoded) ~= "table" then
+                            error("上次同步数据损坏,请稍后重新同步")
+                        end
+                        return decoded
+                    end
                     if mode == "reinject" then
                         local raw = UChild.read_file(chapters_cache_path, true)
                         if not raw then error("没有上次的同步数据,请先完整同步一次") end
@@ -775,16 +802,9 @@ function SyncTask:start(task, on_progress, on_done)
                 if cs > 1 or completed_markers[bid] then resume_any = true end
                 if not completed_markers[bid] then all_completed = false end
             end
-            -- 限速等待按书隔离(评审六轮 P2#3):只有实际触发限速(带 retry_after)的书
-            -- 才等待,且等所有限速书各自过期(max);未限速书无 retry_after,不受影响。
-            local retry_after
-            for _, bid in ipairs(book_ids) do
-                local ra = tonumber((previous_states[bid] or {}).retry_after)
-                if ra then retry_after = math.max(retry_after or 0, ra) end
-            end
-            if retry_after and retry_after > os.time() then
-                FFIUtil.usleep((retry_after - os.time()) * 1000000)
-            end
+            -- 限速等待不再做任务启动前的全局 usleep(评审七轮):此前取全部书的
+            -- max retry_after 统一等待,一本书限速冷却会让未限速书一起暂停;现在
+            -- 冷却书在 chapters/fetch 层只读缓存、不发网络,未限速书照常拉取注入。
             local cached_annotations = {
                 fetch_chapter = function(_, bid, uid)
                     local fetch_started = os.time()
@@ -803,6 +823,16 @@ function SyncTask:start(task, on_progress, on_done)
                                 "thoughts=", tostring(data.thought_entry_count or 0))
                             return data
                         end
+                    end
+                    if cooldown[bid] then
+                        -- 限速冷却(评审七轮):只读缓存,绝不发网络;缓存未命中按空数据
+                        -- 处理(resumed 免得占预算),下一轮冷却结束后再补拉。
+                        return {
+                            book_id = tostring(bid), chapter_uid = tostring(uid),
+                            underlines = {}, review_map = {}, review_groups = {},
+                            underline_count = 0, thought_count = 0, thought_entry_count = 0,
+                            errors = {}, underline_request_ok = true, resumed = true,
+                        }
                     end
                     if mode == "reinject" then
                         -- 离线重注绝不碰网络。分批场景下缓存本来就可能只覆盖前若干批,
@@ -990,6 +1020,11 @@ function SyncTask:start(task, on_progress, on_done)
                 -- 多书时严格按 report.per_book[bid] 落盘,不再把聚合值写入每本书(P1#5):
                 -- 否则末本游标会覆盖他本,导致重复拉取或跳过章节、.completed 误判。
                 for _, bid in ipairs(book_ids) do
+                    if cooldown[bid] then
+                        -- 限速冷却(评审七轮):保留上次 state.json 与 .completed 现状,
+                        -- 不写入(冷却书本轮无网络产出,next_index/pending/retry_after
+                        -- 原样保留,下一轮冷却结束后再处理),也不生成 .completed。
+                    else
                     local pb = (report.per_book and report.per_book[tostring(bid)]) or {}
                     -- pending=nil(章节列表失败/为空)= 剩余未知:不落 0,序列化省略该键,
                     -- 阅读端聚合时按「未知」处理,不得隐式当 0 吞掉失败书(评审五轮 P1#2)。
@@ -1022,6 +1057,7 @@ function SyncTask:start(task, on_progress, on_done)
                         local marker = cache_for(bid) .. "/.completed"
                         if UChild.file_exists(marker) then pcall(os.remove, marker) end
                     end
+                    end  -- cooldown else 结束:冷却书保留原状态
                 end
             end
             return {report = report, auth = store:auth()}
@@ -1100,5 +1136,6 @@ SyncTask._is_memory_error = is_memory_error
 SyncTask._diagnostics_enabled = diagnostics_enabled
 SyncTask._parse_memory_available_kb = parse_memory_available_kb
 SyncTask._decode_wait_status = decode_wait_status
+SyncTask._cooling_books = cooling_books
 
 return SyncTask
