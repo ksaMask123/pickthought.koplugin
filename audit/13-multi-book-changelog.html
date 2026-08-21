@@ -420,13 +420,49 @@
           <div class="v">状态落盘 / 报告聚合 / 限速等待边界 + 菜单去重；成功路径行为不变，向后兼容。</div>
         </div>
       </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-21（评审七轮 · 限速冷却按书延迟，不做启动前全局等待）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-21 第7轮意见（提交 68a11b4）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-21（T12:52:26Z）指出：多书任务的 <code>retry_after</code> 等待调度仍按「全部书取最大等待时间后统一 <code>usleep</code>」——只要一本书仍在限速冷却，整个多书任务都会先暂停，其他未限速书也无法拉取，与「限速按书隔离」目标不一致（<code>retry_after</code> 只是按书写入状态文件，实际调度仍被最长等待全局阻塞）。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><strong>删除启动前全局等待</strong>：不再遍历全部书 <code>retry_after</code> 取 max 后统一 <code>usleep</code>。</li>
+              <li><strong>冷却书按书暂缓、只读缓存不发网络</strong>：<code>cooling_books()</code> 判定 <code>retry_after</code> 未过期的书标记冷却——<code>chapters()</code> 读本地 <code>chapters.json</code> 缓存、<code>fetch_chapter</code> 只读章节缓存（未命中按空数据 <code>resumed</code> 处理，下一轮冷却结束后补拉）；状态落盘保留原 <code>state.json</code> 与 <code>.completed</code> 现状（不写入、不生成 <code>.completed</code>）。</li>
+              <li><strong>重建保留冷却书缓存</strong>：冷却书留在 <code>book_ids</code> 内参与注入——已缓存章节照常注入，多书全量重建时不丢冷却书旧划线/想法。</li>
+              <li><strong>未限速书不受影响</strong>：正常拉取章节列表与章节数据、照常注入、生成 <code>.completed</code>。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 2 用例）</div>
+          <div class="v">
+            <ul>
+              <li><code>test_sync_task.lua</code>：冷却判定单元用例（<code>retry_after</code> 未过期 / 已过期 / 缺失）。</li>
+              <li><code>test_sync_frontend.lua</code>：多书冷却集成用例（stub <code>runInSubProcess</code> 同步执行真实 worker）——A 书冷却（<code>retry_after</code> 未过期 + 缓存预置）、B 书正常：断言 <code>api:chapters</code> 只被 B 请求、<code>fetcher</code> 只被 B 调用、A 不生成 <code>.completed</code>、A 的 <code>state.json</code> 原样保留、B 生成 <code>.completed</code>、所有 <code>usleep</code> &lt; 1 秒（无全局冷却等待）、注入执行（A 缓存划线参与重建）。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync_task.lua / 两个测试文件）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 224 passed / 0 failed</span>（222 + 本轮 2 用例）+ Python 契约 19/19。</li>
+              <li>CI <code>quality / verify</code> 对 head <code>68a11b4</code> 运行中。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅 <code>sync_task.lua</code> 多书限速调度边界；成功路径行为不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
     </div>
     </div>
 
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>222 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>224 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
