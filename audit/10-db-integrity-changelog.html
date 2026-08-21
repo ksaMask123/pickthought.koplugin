@@ -208,9 +208,19 @@
   <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">229 passed / 0 failed</span>（含 DB 完整性 31/0）；CI <code>quality / verify</code> 对 head <code>ebe5e96</code> 运行中。<br>
   <b>影响范围</b>：仅 <code>thought_db.lua</code> 原子隔离的错误码区分 / fd 生命周期 / 存在性判断；向后兼容，非 Linux / 无 ffi 仍走降级路径。
 
+
+  <h2>十三、2026-08-21 第7轮复审（提交 e7bfbda，回退路径 io.open 错误区分 + migrate 异常保护）</h2>
+  <p>作者（Mr54233）在 2026-08-21T12:51:23Z 的第7轮意见指出最后两处跨平台边界，全部落实：</p>
+  <ul>
+    <li><b>① 回退路径 io.open 错误区分（意见①）</b>：<code>reserve_corrupt_main()</code> 无 FFI / 非 Linux 回退路径的 <code>io.open</code> 探测失败时，不再一律当「目标不存在」继续换名循环——仅「明确不存在」（ENOENT / No such file / not exist）允许继续尝试；权限不足 / 磁盘空间不足 / 其他 I/O 错误立即返回失败（与 Linux 原子路径「仅 EEXIST 换名、其他错误立即失败」一致），避免最多 100000 次循环长时间阻塞 Kindle；<code>.isolated</code> 标记保留阻断自动建库、主库不被移动。</li>
+    <li><b>② migrate 异常保护（意见②·防御性）</b>：任一级迁移失败立即中止并返回 <code>false</code>，调用方不再无条件 <code>set_user_version</code>——迁移未完成不得声称已升级，否则下次打开跳过必要迁移（当前 <code>MIGRATIONS</code> 为空，不构成现版本阻断；为未来迁移预留）。</li>
+  </ul>
+  <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">230 passed / 0 failed</span>（229 + 本轮 1 用例：无 FFI 回退路径 io.open 权限错误 → 立即失败、只试 1 次、<code>.isolated</code> 保留、主库未动）；CI <code>quality / verify</code> 对 head <code>e7bfbda</code> 运行中。<br>
+  <b>影响范围</b>：仅 <code>thought_db.lua</code> 回退探测错误区分 + 迁移版本号保护；Linux 原子路径行为不变，向后兼容。
+
 </div>
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>ebe5e96</code>（rebase 至 435971b，全量 229 passed / 0 failed）。</p>
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>e7bfbda</code>（第7轮，回退路径错误区分 + migrate 保护，全量 230 passed / 0 failed）。</p>
 </div>
 </body>
 </html>
