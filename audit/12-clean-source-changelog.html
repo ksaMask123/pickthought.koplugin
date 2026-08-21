@@ -50,7 +50,7 @@
     <div class="kv">
       <div class="k">本期特性</div><div class="v"><b>clean_source 逃生舱</b>（绕开脏/缺失的 <code>.orig</code> 干净备份）+ <b>重注菜单选干净原书 UI 接线</b></div>
       <div class="k">分支</div><div class="v"><code>pr/clean-source</code> → 基于 <code>upstream/main</code> (a8c2e1f, v0.3.2) · 已 rebase 最新 main 并解决冲突（保留主线 test_sync_state / test_sync_gate / test_thought_popup / test_updater 测试）</div>
-      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希） · <code>3d74d61</code> fix(clean-source): 默认 copy_file 包装 return step() 让取消传播 + 默认路径取消测试 · <code>9708ca2</code> fix(clean-source): 作者第6轮复审 — .orig.old 失败恢复 + 遗留 .old 中断恢复 · <code>966966a</code> fix(clean-source): 作者第7轮复审 — 恢复解析校验 + 主书暂存失败回滚 + 清理检查</div>
+      <div class="k">提交</div><div class="v"><code>e8df194</code> feat(ui): 重注菜单支持选择干净原书 · <code>39b53e6</code> feat(sync): clean_source 逃生舱 · <code>4a91c12</code> fix(sync): 重建前暂存脏 doc_path 为 .old 修复 swap 踩已存在目标 · <code>c6d20d8</code> fix(sync): 落实 clean_source 评审四项修复(P1×3 + P2) · <code>3c5e4ce</code> fix(clean_source): 落实 2026-08-15 复审四点 · <code>5109fb6</code> fix(clean_source): 落实 2026-08-17 第三轮评审 6 项边界（取消向上传递 / 恢复如实区分 / 章节缓存仍可见入口 / 统一注入基线 / EOF与读错区分 / 签名哈希） · <code>3d74d61</code> fix(clean-source): 默认 copy_file 包装 return step() 让取消传播 + 默认路径取消测试 · <code>9708ca2</code> fix(clean-source): 作者第6轮复审 — .orig.old 失败恢复 + 遗留 .old 中断恢复 · <code>966966a</code> fix(clean-source): 作者第7轮复审 — 恢复解析校验 + 主书暂存失败回滚 + 清理检查 · <code>df933b4</code> fix(clean-source): 作者第8轮复审 — sync_entry 登录门禁按模式(离线重注免登录)</div>
       <div class="k">改动文件</div><div class="v">9 个：<code>sync.lua</code> (+221)、<code>main.lua</code> (+46)、<code>binding.lua</code> (+11，新增 <code>offer_reinject</code> 纯判定)、<code>sync_task.lua</code> (+4)、<code>util.lua</code> (+110，流式复制+内容指纹+路径哈希)、<code>tests/run.lua</code> (+1)、<code>tests/test_binding.lua</code> (+11)、<code>tests/test_sync.lua</code> (+4)、<code>tests/test_sync_clean_source.lua</code> (+509，共 19 用例)</div>
       <div class="k">校验</div><div class="v"><span class="badge b-good">LuaJIT 语法 OK</span><span class="badge b-good">全量测试 198/0</span><span class="badge b-acc">含 19 个 clean_source 用例</span><span class="badge b-acc">rebase 最新 main 后 24 个主线新增用例随行</span><span class="badge b-good">设备数据动态验证通过</span><span class="badge b-good">真机端到端验证通过</span></div>
     </div>
@@ -401,6 +401,35 @@
           <div class="v">仅 clean_source 失败恢复与暂存清理边界；成功路径行为不变，向后兼容。</div>
         </div>
       </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-21（评审八轮 · sync_entry 登录门禁按模式，离线重注免登录）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-21 第8轮意见（提交 df933b4）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-21（T13:21:46Z）指出：<code>Plugin:reinject_with_clean()</code> 选择干净原书后调用 <code>sync_entry(path,"reinject",{clean_source=clean})</code>，但 <code>sync_entry()</code> 在判断同步模式前就无条件 <code>require_login()</code>——用户即使拥有完整本地章节缓存并已选定有效干净原书，退出登录后仍被登录检查拦截，无法进入离线重注流程。这与「离线重注不依赖网络」的边界不一致。</div>
+          <div class="k">修复</div>
+          <div class="v"><code>Plugin:sync_entry()</code> 仅对联网同步模式执行 <code>require_login()</code>：<code>mode == "reinject"</code> 时跳过登录检查（只用本地缓存 + 用户选定的干净原书，不依赖微信读书在线接口）；普通 <code>sync</code> 模式的未登录拦截保持不变。</div>
+          <div class="k">测试（新增 2 用例）</div>
+          <div class="v">
+            <ul>
+              <li>「sync 模式未登录：<code>require_login</code> 被拦截，不启动任务」——登录门禁对联网同步保留。</li>
+              <li>「reinject 模式未登录：跳过登录检查，离线重注正常启动（<code>clean_source</code> 透传）」——未登录 + 本地缓存完整 + 指定有效 <code>clean_source</code> → <code>_start_sync_task</code> 收到 <code>mode="reinject"</code> 且 <code>clean_source</code> 透传，<code>require_login</code> 零调用。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（main.lua / 测试）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 226 passed / 0 failed</span>（224 + 本轮 2 用例）+ Python 契约 18/18。</li>
+              <li>CI <code>quality / verify</code> 对 head <code>df933b4</code> 运行中。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅 <code>main.lua</code> 同步入口的登录门禁按模式区分；联网路径拦截行为不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
     </div>
 </div>
 
