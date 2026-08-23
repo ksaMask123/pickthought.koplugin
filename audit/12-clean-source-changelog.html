@@ -465,6 +465,37 @@
     本日志为 pickthought.koplugin 的专属更新时间线，遵循「改完即记录、随改随追、不积压」纪律。
     本特性 PR 基于上游 <code>Mr54233/pickthought.koplugin:main</code>，不进 fork <code>main</code> 的审计目录；
     配套 HTML 更新日志（即本文件）随代码推送同步提交至 fork <code>main</code> 的 <code>audit/</code> 下。
+  <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-22T10:10:12Z 指出一处残留边界：当前书是干净原书、用户选了另一份 <code>clean_source</code> 重建时，成功 swap 后原通用 <code>.old</code> 清理逻辑会把用户原本打开的干净原书（暂存为 <code>.old</code>）删除——不同版本的原始干净书被永久销毁，且无任何提示告知用户原书去向。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><code>sync.lua</code>：在「干净原书 + <code>clean_source</code>」分支新增 <code>kept_original</code> 标记，记录原始干净书暂存路径（<code>.old</code>）。成功 swap 后通用清理块对该 <code>.old</code> <b>跳过删除</b>（保留供用户手动恢复），仅清理脏注入版临时回滚的 <code>.old</code> / <code>.orig.old</code>。明确区分「失败回滚暂存」与「需保留的原始干净书」。</li>
+              <li><code>sync.lua</code>：<code>kept_original</code> 写入报告返回字段，供报告层提示。</li>
+              <li><code>sync_report.lua</code>：报告新增「原始干净书已保留（未删除）：&lt;path&gt;」与「如需恢复原书，请手动将该文件重命名为原书名（.epub）」提示，避免用户误判原书已被销毁。</li>
+            </ul>
+          </div>
+          <div class="k">测试（强化 + 新增 2 用例）</div>
+          <div class="v">
+            <ul>
+              <li>强化「当前书是干净原书 → 原书保留为 .old 不丢」：新增断言 <code>report.kept_original</code> 指向 <code>.old</code>、成功后该 <code>.old</code> 不被删除、报告含恢复提示。</li>
+              <li>新增「当前书与源版本不同 → 原书保留不删且 .orig 为源」回归：验证 .orig 固化自 <code>clean_source</code>（而非当前书版本）、当前书保留为 .old 且报告提示手动恢复。</li>
+              <li>清理警告用例调整为预置 .orig，验证 <code>.orig.old</code> 清理失败仍入 warnings（第7轮意见③）。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / sync_report.lua）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 227 passed / 0 failed</span>（226 + 本轮强化净增 1 用例）。</li>
+              <li>行为向后兼容：脏注入版重建的 <code>.old</code> 清理、<code>.orig.old</code> 警告逻辑不变；仅原始干净书受保护保留。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
   </div>
 </div>
 </body>
