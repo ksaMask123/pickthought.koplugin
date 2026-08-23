@@ -218,9 +218,23 @@
   <b>校验结果</b>：LuaJIT 语法 OK；全量测试 <span class="ok">230 passed / 0 failed</span>（229 + 本轮 1 用例：无 FFI 回退路径 io.open 权限错误 → 立即失败、只试 1 次、<code>.isolated</code> 保留、主库未动）；CI <code>quality / verify</code> 对 head <code>baa64d4</code> <span class="ok">通过</span>（actions/runs/32493997597，含 fake ffi 注入强制退化分支的跨平台修复——CI Linux 原子路径不再吞掉 io.open mock），PR <code>mergeable_state=clean</code>。<br>
   <b>影响范围</b>：仅 <code>thought_db.lua</code> 回退探测错误区分 + 迁移版本号保护；Linux 原子路径行为不变，向后兼容。
 
+<div class="box">
+    <b>动机</b>：作者在 2026-08-22T09:42:32Z 的第8轮意见指出四处残留边界，已逐条落实（仅 thought_db.lua + thoughts.lua + 测试，行为向后兼容）。<br>
+    <b>具体改动</b>：
+    <ul>
+      <li><b>① 损坏主库重命名失败不再盲目循环（第8轮意见 #1）</b>：<code>reserve_corrupt_main</code> 新增 <code>ATOMIC_OPEN</code> 分支判定。原子路径（Linux <code>O_CREAT|O_EXCL</code> 已独占目标）下 rename 失败，直接清理本流程空占位后返回失败，<b>不进入换名循环</b>（避免最多 100000 次阻塞 Kindle）；退化路径仅当目标被明确占用（竞态，ENOENT/No such file）才换名重试，权限/磁盘/IO 等其他错误立即失败。<code>.isolated</code> 标记由调用方保留阻断自动建库，主库不被移动。</li>
+      <li><b>② 退化 io.open 空错误文本按 uncheckable（第8轮意见 #2）</b>：<code>path_exists_distinct</code> 退化分支原把 <code>err==""</code> 与"不存在"等同处理；现仅匹配 <code>no such file</code>/<code>不存在</code>，空错误文本落入 <code>uncheckable</code>，阻止自动创建新数据库，避免异常 I/O 下误建空库掩盖数据。</li>
+      <li><b>③ thoughts.lua 透传 ThoughtDB.open 具体错误（第8轮意见 #3）</b>：<code>open_db</code> 改为 <code>db, open_err = ThoughtDB.open(...)</code>，失败返回 <code>nil, open_err</code>；<code>save</code>/<code>find</code> 把具体错误（损坏隔离/权限/迁移失败描述）向上传，不再吃成通用"想法数据库不可用"，便于真机定位。<code>merge</code> 维持原静默契约（仅判真/假）。</li>
+      <li><b>④ migrate/ensure_schema/set_user_version 统一失败契约（第8轮意见 #4）</b>：<code>set_user_version</code> 返回 <code>pcall</code> 结果（写入失败可感知）；<code>migrate</code> 对迁移函数<b>显式返回 false</b> 也视为失败（原仅捕 <code>pcall</code> 抛错），立即中止；<code>ensure_schema</code> 在 migrate 失败或 <code>user_version</code> 写入失败时一律返回 false，<b>绝不返回"可用库"、绝不推进 user_version</b>（防止下次打开跳过必要迁移）。暴露 <code>ThoughtDB.MIGRATIONS</code> 供测试注入。</li>
+    </ul>
+    <b>影响范围</b>：仅 <code>thought_db.lua</code>（rename 失败分支 / 空错误文本 / 迁移契约）+ <code>thoughts.lua</code>（错误透传）；Linux 原子路径行为不变，向后兼容。<br>
+    <b>校验结果</b>：新增 6 用例（原子 rename 失败立即中止 / 空错误文本 uncheckable 阻断 / 迁移返回 false→open 失败 / 迁移抛错→open 失败 / 无迁移路径 user_version 正常 / open_db 透传具体错误）。本地全量 <b>236 passed / 0 failed</b>（基线 230 + 6）；CI <code>quality / verify</code> 对 head <code>edf562f</code> 监控中。LuaJIT 语法校验通过。
 </div>
 
-<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>baa64d4</code>（第7轮 + CI 跨平台修复，全量 230 passed / 0 failed，CI 通过）。</p>
+<p class="ts">本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 4 个源/测试文件（thought_db.lua / thoughts.lua / test_thought_db_integrity.lua / test_thoughts.lua）。最新 head：<code>edf562f</code>（第8轮 — 迁移失败契约 + 损坏隔离残留边界，全量 236 passed / 0 failed）。</p>
+
+
+本更新日志随 PR #15 修正提交至 fork <code>main</code>（不进 PR diff）。PR diff 仅含 3 个源/测试文件（thought_db.lua / test_thought_db_integrity.lua / stubs.lua）。最新 head：<code>baa64d4</code>（第7轮 + CI 跨平台修复，全量 230 passed / 0 failed，CI 通过）。</p>
 </div>
 </body>
 </html>
