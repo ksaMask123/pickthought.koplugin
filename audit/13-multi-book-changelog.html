@@ -458,11 +458,46 @@
     </div>
     </div>
     </div>
+  <div class="tl-item">
+      <div class="tl-date">2026-08-22（评审八轮 · 冷却书部分缓存 deferred 状态 + 按书限速真实 HTTP 链路隔离）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-22 第8轮意见（提交 80f5013）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-22（T09:59:05Z）指出剩余两处边界：① 冷却书部分缓存命中、其余章缺失时，当前实现把缺失章返回为空 <code>resumed</code> 数据，<code>Sync.run</code> 继续推进游标并计入已处理，报告可能误报全部完成，但任务层 <code>state.json</code> 仍保留 pending 章节——报告与磁盘状态矛盾（P1#1）。② HTTP 层限速状态仍按 <code>annotations-web</code> / <code>annotations-agent</code> 接口 scope 共享、不含 <code>book_id</code>，A 书触发共享限速后 B 书用同一接口仍可能被 HTTP 层 fail-fast；现有测试用 stub 绕过真实 <code>Http</code> 限速，无法证明 B 书在真实链路可继续（P1#2）。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><strong>P1#1 deferred 状态（sync.lua / sync_task.lua / sync_report.lua）</strong>：冷却书缓存未命中章返回含 <code>deferred=true, resumed=true</code> 的占位数据；<code>fetch_book</code> 检测 <code>data.deferred</code> 后标记本书 <code>deferred</code>、游标停在首个缺失章、剩余章计入 <code>pending</code>、不计入已处理；状态落盘写 <code>state.json</code>（<code>deferred/pending/next_index</code> + 保留原 <code>retry_after</code>），不写 <code>.completed</code>；报告新增 <code>deferred_books</code> 独立分支，显式展示「暂缓/剩余待同步」，不显示「全部章节已处理完成」。</li>
+              <li><strong>P1#2 按书限速真实隔离（api.lua）</strong>：新增 <code>annotation_options_with_book(base, book_id)</code>，将 <code>pacing_scope</code> / <code>rate_limit_scope</code> 追加 <code>-&lt;book_id&gt;</code>；<code>underlines</code> / <code>readreviews</code> 的 Web 与 Agent 调用均按书生成独立限速锁（如 <code>annotations-web-b1</code> / <code>annotations-agent-b1</code>），A 书 429 的冷却锁只落其自身 scope，不再 fail-fast 同接口的其他书。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 2 用例）</div>
+          <div class="v">
+            <ul>
+              <li><code>tests/test_sync_frontend.lua</code>：多书限速冷却集成用例——A 部分缓存（第 2 章缺失→deferred）、B 正常完成：断言 B 生成 <code>.completed</code>、A 不生成 <code>.completed</code>、A 状态 <code>deferred==true</code> 且 <code>pending&gt;0</code>、<code>retry_after</code> 保留未被覆盖、报告含「暂缓」且不含「全部章节已处理完成」、无全局等待。</li>
+              <li><code>tests/test_web_fetch.lua</code>：真实 <code>Http</code> 链路隔离用例——A 书触发 429 后冷却锁仅落 <code>annotations-web-A</code>，B 书用 <code>annotations-web-B</code> 不被 fail-fast、请求真实发出；旧基础 scope 不受影响。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（api.lua / sync.lua / sync_task.lua / sync_report.lua / 两个测试文件）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 226 passed / 0 failed</span>（224 + 本轮 2 用例）。</li>
+              <li>CI <code>quality / verify</code> 对 head <code>80f5013</code> 监控中（PR #13 描述已同步基线、测试数与 CI 链接）。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅多书限速调度与按书 HTTP 限速 scope；成功路径与单书行为不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
+
 
   </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>224 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>226 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
