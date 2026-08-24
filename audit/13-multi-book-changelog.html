@@ -495,9 +495,42 @@
 
 
   </div>
+    <div class="tl-item">
+      <div class="tl-date">2026-08-24（评审九轮 · 冷却书零划线缓存误判失败 + 同步最新 main）</div>
+      <div class="tl-title">落实原作者 Mr54233 2026-08-24 第9轮意见（提交 2a83660）</div>
+      <div class="panel" style="margin-top:8px">
+        <div class="kv">
+          <div class="k">动机</div>
+          <div class="v">作者在 2026-08-24（T11:26:19Z）指出最后一处边界：冷却书处于 <code>retry_after</code> 冷却期、章节目录缓存存在，但本地<strong>没有任何划线缓存</strong>时，每章 <code>fetch_chapter</code> 返回 <code>deferred</code>（<code>total_underlines==0</code>、<code>fetched</code> 为空）。此前该场景会落入 <code>sync.lua</code> 的「本批没有划线」失败分支返回 <code>nil+错误</code>，<code>sync_task</code> 据此清 <code>.completed</code> 并覆盖 <code>state.json</code>，导致 <code>retry_after</code> 与暂缓态丢失、冷却书下次提前重发请求（P1）。另要求基于含 #15 的当前 <code>main</code>（<code>d69098e</code>）同步分支、更新描述旧基线。</div>
+          <div class="k">修复</div>
+          <div class="v">
+            <ul>
+              <li><strong>deferred 非失败态（sync.lua）</strong>：<code>fetch_book</code> 结束处若 <code>deferred_books</code> 非空，优先返回 deferred 报告（而非走「本批没有划线」失败分支）——保留 <code>pending/next_index/retry_after</code>、不生成 <code>.completed</code>、报告显式展示「暂缓」。冷却书零划线不再被当成普通失败清 <code>.completed</code>、丢失 <code>retry_after</code>。</li>
+              <li><strong>同步最新 main（d69098e，含已合并 #15）</strong>：分支从 <code>435971b</code> rebase 到 <code>d69098e</code>，保留主线数据库完整性修复及 <code>tests/test_thought_db_integrity.lua</code>；9 个提交 cherry-pick 零冲突落到新基线上。</li>
+            </ul>
+          </div>
+          <div class="k">测试（新增 1 用例）</div>
+          <div class="v">
+            <ul>
+              <li><code>tests/test_sync_frontend.lua</code>：多书限速冷却集成用例——A 零划线缓存（本章节缓存缺失→全章 deferred）、B 正常完成：断言 worker 整体成功（零划线冷却书不误判失败）、A 不生成 <code>.completed</code>、A 状态 <code>deferred==true</code> 且 <code>pending==2</code>、<strong>原 <code>retry_after</code> 保留未丢失</strong>、报告含「暂缓」且不含「全部章节已处理完成」。</li>
+            </ul>
+          </div>
+          <div class="k">校验结果</div>
+          <div class="v">
+            <ul>
+              <li>LuaJIT 语法：<span class="ok">通过</span>（sync.lua / test_sync_frontend.lua）。</li>
+              <li>加载期 / 运行期：<span class="ok">全量测试 265 passed / 0 failed</span>（rebase 到含 #15 的 <code>d69098e</code> 后，基线由 227 升为 265——含 #15 的 38 个测试）。</li>
+              <li>CI <code>quality / verify</code> 对 head <code>2a83660</code> 监控中（PR #13 描述已同步最新 head、测试数与基线）。</li>
+            </ul>
+          </div>
+          <div class="k">影响范围</div>
+          <div class="v">仅冷却书零划线 deferred 的返回路径；成功路径、单书行为及按书限速隔离（八轮）不变，向后兼容。</div>
+        </div>
+      </div>
+    </div>
 
   <div class="foot">
-    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>226 passed / 0 failed</b>（rebase 删除冗余 <code>pickthought.koplugin/tests/</code> 前为 172，本轮新增 / 调整 P1#3×5、P1#4×2）。
+    校验汇总：LuaJIT 语法校验全部通过；测试套件最终 <b>265 passed / 0 failed</b>（rebase 到含 #15 的 <code>d69098e</code> 后基线由 227 升为 265，含 #15 的 38 个测试；本轮新增零划线 deferred 用例 1 例）。
     本 HTML 为 PR #13 专属更新日志，按项目纪律随代码变更同步维护，单独进 fork <code>main</code>（不进入 PR diff）。
   </div>
 </div>
